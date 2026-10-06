@@ -78,8 +78,8 @@ const SECTIONS: SectionDef[] = [
     key: "retry",
     fields: [
       f("retry", "max_attempts", "int", { min: 0, max: 10 }),
-      f("retry", "base_seconds", "float", { min: 0.1, max: 60, step: 0.5, precision: 2 }),
-      f("retry", "max_seconds", "float", { min: 0.1, max: 600, step: 1, precision: 2 }),
+      f("retry", "base_seconds", "float", { min: 0.01, max: 60, step: 0.5, precision: 2 }),
+      f("retry", "max_seconds", "float", { min: 0.01, max: 600, step: 1, precision: 2 }),
       f("retry", "jitter", "bool"),
       f("retry", "retry_on", "categories"),
     ],

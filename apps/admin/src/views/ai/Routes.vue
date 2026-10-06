@@ -143,7 +143,8 @@ interface ModelChip {
   model: string;
   index: number;
   health: HealthStatus;
-  isAvailable: boolean;
+  /** false：is_available=0；null：模型不在 ai_models（两者都标「不在目录」） */
+  isAvailable: boolean | null;
   breakerState: BreakerState;
   breakerReason: BreakerReason | null;
 }
@@ -166,7 +167,7 @@ function chipOf(route: CapabilityRoute, model: string, index: number): ModelChip
     model,
     index,
     health: snap?.status ?? "unknown",
-    isAvailable: snap?.is_available ?? true,
+    isAvailable: snap ? snap.is_available : true,
     breakerState: snap?.breaker_state ?? (index === 0 ? (route.breaker_state ?? "closed") : "closed"),
     breakerReason: snap?.breaker_reason ?? (index === 0 ? (route.breaker_reason ?? null) : null),
   };
@@ -589,9 +590,10 @@ function gotoSettings() {
             <el-table-column :label="t('aiRoutes.breakerReason')" width="110">
               <template #default="{ row }"><StatusTag kind="breaker_reason" :value="row.breaker_reason" effect="plain" /></template>
             </el-table-column>
-            <el-table-column :label="t('aiRoutes.availableCol')" width="80">
+            <el-table-column :label="t('aiRoutes.availableCol')" width="110">
               <template #default="{ row }">
-                <el-tag :type="row.is_available ? 'success' : 'danger'" size="small" effect="plain">{{ row.is_available ? t("common.yes") : t("common.no") }}</el-tag>
+                <el-tag v-if="row.is_available === null" type="danger" size="small" effect="plain">{{ t("aiRoutes.notInCatalog") }}</el-tag>
+                <el-tag v-else :type="row.is_available ? 'success' : 'danger'" size="small" effect="plain">{{ row.is_available ? t("common.yes") : t("common.no") }}</el-tag>
               </template>
             </el-table-column>
           </el-table>

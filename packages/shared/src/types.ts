@@ -929,7 +929,8 @@ export interface RouteModelStatus {
   /** 0 主模型，1..n 备选 */
   candidate_index: number;
   health: HealthStatus;
-  is_available: boolean;
+  /** `ai_models.is_available`；模型不在 `ai_models`（尚未同步到目录）时为 null */
+  is_available: boolean | null;
   breaker_state: BreakerState;
   breaker_reason: BreakerReason | null;
 }
@@ -990,8 +991,10 @@ export interface HealthResult {
 export interface WorkerHeartbeat {
   name: "worker" | "monitor_worker" | string;
   hostname: string;
-  pid: number;
-  heartbeat_at: string;
+  /** 心跳值缺 pid 时取键名中的 pid 段（通常为整数） */
+  pid: number | string;
+  /** 心跳值无法解析时为 null（此时 `alive=false`） */
+  heartbeat_at: string | null;
   alive: boolean;
 }
 
@@ -1008,7 +1011,8 @@ export interface AiHealthSnapshot {
     checked_at: string | null;
     breaker_state: BreakerState;
     breaker_reason: BreakerReason | null;
-    is_available: boolean;
+    /** 模型不在 `ai_models` 时为 null */
+    is_available: boolean | null;
   }[];
   workers: WorkerHeartbeat[];
 }
@@ -1033,6 +1037,8 @@ export interface AiUsageLog {
   upstream_created_at: string | null;
   /** 匹配到的本地尝试行 */
   ai_task_id: number | null;
+  /** 派生字段：`ai_task_id` 非空 */
+  matched: boolean;
   matched_at: string | null;
   pulled_at: string;
   raw: Record<string, unknown>;
@@ -1052,14 +1058,16 @@ export interface ReconcileResult {
 
 /** `GET /admin/ai/usage/summary` 的行 */
 export interface AiUsageSummaryRow {
-  key: string;
+  /** 分组键（model / capability / 项目 ID 字符串 / YYYY-MM-DD）；分组列为空（如无项目的任务、无模型）时为 null */
+  key: string | null;
   calls: number;
   prompt_tokens: number;
   completion_tokens: number;
   quota_estimated: number;
   quota_actual: number;
   cost_cny: number;
-  reconciled_rate: number | null;
+  /** `reconciled_at` 非空的尝试行数 / calls（0~1） */
+  reconciled_rate: number;
 }
 
 /**
@@ -1608,4 +1616,62 @@ export interface SystemHealth {
   workers: { worker: WorkerGroupHealth; monitor_worker: WorkerGroupHealth };
   warnings: string[];
   version: string;
+}
+
+// =====================================================================
+// 项目与 Prompt 模板的请求体（04 §6.7、§6.8、§7.3）
+// =====================================================================
+
+/** `POST /admin/projects`；`PUT /admin/projects/{id}` 同结构（`owner_id` 变化即转移负责人） */
+export interface ProjectBody {
+  name: string;
+  slug: string;
+  industry?: string | null;
+  audience?: string | null;
+  brand_name?: string | null;
+  brand_info?: string | null;
+  description?: string | null;
+  language: Locale | string;
+  default_style: ContentStyle;
+  default_format: ContentFormat;
+  /** 键 ∈ prompt_kind，值为该 kind 的可见 published 模板 ID（省略的 kind 按系统模板回退） */
+  default_templates?: Partial<Record<PromptKind, number>>;
+  default_platform_ids?: number[];
+  /** 省略时为当前用户；`own` 范围只能为本人 */
+  owner_id?: number;
+}
+
+/** `PUT /admin/projects/{id}/routes` 的一行（未出现的能力删除覆盖行） */
+export interface ProjectRouteInput {
+  capability: Capability;
+  primary_model: string;
+  fallback_models: string[];
+  params?: Record<string, unknown>;
+  protocol?: Protocol;
+}
+
+/** `POST /admin/prompt-templates` */
+export interface PromptTemplateCreateBody {
+  code: string;
+  kind: PromptKind;
+  name: string;
+  description?: string | null;
+  language: Locale | string;
+  /** 0 = 全局 */
+  project_id: number;
+  system_prompt?: string | null;
+  user_prompt: string;
+  variables: PromptVariable[];
+  output_format: PromptOutputFormat;
+  output_schema?: Record<string, unknown> | null;
+  model_params?: Record<string, unknown> | null;
+}
+
+/** `PUT /admin/prompt-templates/{id}`：`code`/`kind` 创建后不可修改 */
+export type PromptTemplateUpdateBody = Partial<Omit<PromptTemplateCreateBody, "code" | "kind">>;
+
+/** `POST /admin/prompt-templates/{id}/duplicate` */
+export interface PromptTemplateDuplicateBody {
+  code: string;
+  name: string;
 }
