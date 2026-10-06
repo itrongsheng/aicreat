@@ -49,6 +49,8 @@ export function fieldErrors(err: unknown): Record<string, string> {
 }
 
 const LOGIN_URL = "/admin/auth/login";
+/** 登出请求的 401（令牌已失效）不再走「登录已失效」流程：登录态本就在清除 */
+const LOGOUT_URL = "/admin/auth/logout";
 /** 用户视角下除 GET 外也附加 owner_id 的写接口（13 §12.2） */
 const OWNER_SCOPED_POSTS = new Set(["/admin/monitoring/link-checks/run", "/admin/monitoring/index-checks/run"]);
 
@@ -62,7 +64,8 @@ function pathOf(config: AxiosRequestConfig): string {
 
 http.interceptors.request.use((config: InternalAxiosRequestConfig) => {
   const auth = useAuthStore();
-  if (auth.token) config.headers.set("Authorization", `Bearer ${auth.token}`);
+  // 调用方显式携带的 Authorization（如登出时传入清空前的令牌）不覆盖
+  if (auth.token && !config.headers.has("Authorization")) config.headers.set("Authorization", `Bearer ${auth.token}`);
   const locale = getLocale();
   config.headers.set("Accept-Language", locale);
   const params: Record<string, unknown> = { ...(config.params ?? {}) };
@@ -71,8 +74,9 @@ http.interceptors.request.use((config: InternalAxiosRequestConfig) => {
   const method = (config.method ?? "get").toLowerCase();
   const project = useProjectStore();
   if (auth.isAllScope && project.ownerId > 0 && (method === "get" || (method === "post" && OWNER_SCOPED_POSTS.has(pathOf(config))))) {
-    // 请求已显式携带 owner_id（含显式 null 表示不附加）时不覆盖
-    if (!Object.prototype.hasOwnProperty.call(params, "owner_id")) params.owner_id = project.ownerId;
+    // 请求已显式携带 owner_id（params 中含该键，含显式 null 表示不附加；或 URL 查询串已带）时不覆盖
+    const inUrl = /[?&]owner_id=/.test(config.url ?? "");
+    if (!inUrl && !Object.prototype.hasOwnProperty.call(params, "owner_id")) params.owner_id = project.ownerId;
   }
   config.params = params;
   return config;
@@ -127,7 +131,8 @@ async function handleUnauthorized(): Promise<void> {
     ElMessage.warning({ message: t("common.sessionExpired"), grouping: true });
   }
   const current = router.currentRoute.value;
-  if (current.name !== "login") {
+  // 首次导航（START_LOCATION，matched 为空）期间由路由守卫负责跳转，避免重复导航
+  if (current.matched.length > 0 && current.name !== "login") {
     await router.replace({ name: "login", query: current.fullPath && current.fullPath !== "/" ? { redirect: current.fullPath } : {} });
   }
 }
@@ -163,10 +168,11 @@ async function toApiError(error: AxiosError): Promise<ApiError> {
   const data = body?.data ?? null;
   const requestId = (response.headers?.["x-request-id"] as string | undefined) ?? null;
   const apiError = new ApiError(code, message, data, status, requestId);
-  const isLogin = pathOf(config ?? {}) === LOGIN_URL;
+  const path = pathOf(config ?? {});
+  const isLogin = path === LOGIN_URL;
 
   if (status === 401) {
-    if (!isLogin) await handleUnauthorized();
+    if (!isLogin && path !== LOGOUT_URL) await handleUnauthorized();
     return apiError;
   }
   if (status === 403) {

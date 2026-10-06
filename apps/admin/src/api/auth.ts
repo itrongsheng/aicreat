@@ -21,8 +21,12 @@ export function me(): Promise<AdminProfile> {
   return get<AdminProfile>("/admin/auth/me");
 }
 
-export function logout(): Promise<null> {
-  return post<null>("/admin/auth/logout", undefined, { silent: true });
+/**
+ * 登出：`token` 为调用方在清空登录态之前取得的令牌（store 同步清空 token 后请求拦截器才执行，
+ * 因此显式携带）；省略时由拦截器按当前登录态注入。
+ */
+export function logout(token?: string | null): Promise<null> {
+  return post<null>("/admin/auth/logout", undefined, { silent: true, headers: token ? { Authorization: `Bearer ${token}` } : undefined });
 }
 
 export function changePassword(body: ChangePasswordBody): Promise<null> {
@@ -33,3 +37,6 @@ export function changePassword(body: ChangePasswordBody): Promise<null> {
 export function siteInfo(locale: Locale): Promise<SiteInfo> {
   return get<SiteInfo>("/admin/auth/site-info", { locale }, { silent: true });
 }
+
+/** 与 docs/07 §9.1 的 `authApi.login(...)` 用法一致的命名空间导出 */
+export const authApi = { login, me, logout, changePassword, siteInfo };
