@@ -6,14 +6,14 @@
 //   SEO 要素（含 include_faq）、重写（模式受 rewrite.modes 限制、范围全文 / 指定小节（按 outline 顺序）、改风格、补充要求、模板、模型）、
 //   提审 / 通过 / 驳回（审核意见）、归档 / 恢复、导出 md / html / json、版本抽屉、删除；可用动作由 CONTENT_ACTIONS（状态 → 动作）决定；
 // - 面板：任务（TaskProgress）、大纲（OutlineEditor，增删改排后随保存提交）、SEO（字数提示、关键词 Tag、FAQ）、素材（插入到光标 / 设为封面 / 解绑，
-//   按素材 ID 绑定）、链接（GET /contents/{id}/links）、信息；
+//   AssetPicker 选择已有素材绑定为配图 / 封面、上移 / 下移、「生成配图 / 生成封面」跳转图片工作台并预选本内容，docs/10 §7.5）、链接（GET /contents/{id}/links）、信息；
 // - 模板下拉仅 has('content.prompt_templates.view')、模型下拉仅 has('ai.models.view') 时显示，否则请求不带 template_id / model（§10.8）；
 // - 路由 /contents/new：打开手工创建对话框，创建后进入该内容的编辑器。
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute, useRouter } from "vue-router";
 import { useI18n } from "vue-i18n";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { ArrowDown, ArrowLeft, Clock, Delete, DocumentChecked, EditPen, MagicStick, Picture, Refresh } from "@element-plus/icons-vue";
+import { ArrowDown, ArrowLeft, Bottom, Clock, Delete, DocumentChecked, EditPen, FolderOpened, MagicStick, Picture, Refresh, Top, VideoCamera } from "@element-plus/icons-vue";
 import {
   CONTENT_ACTIONS,
   CONTENT_LIMITS,
@@ -37,6 +37,7 @@ import {
 } from "@aicreat/shared";
 import { isApiError } from "@/api/client";
 import * as contentsApi from "@/api/contents";
+import AssetPicker from "@/components/AssetPicker.vue";
 import ContentCreateDialog from "@/components/ContentCreateDialog.vue";
 import ContentVersionsDrawer from "@/components/ContentVersionsDrawer.vue";
 import FaqEditor from "@/components/FaqEditor.vue";
@@ -48,6 +49,7 @@ import OutlineEditor, { normalizeOutline, validateOutline } from "@/components/O
 import StatusTag from "@/components/StatusTag.vue";
 import TaskProgress, { isTerminalTask } from "@/components/TaskProgress.vue";
 import TemplateSelect from "@/components/TemplateSelect.vue";
+import { assetMarkup, describeAttachError } from "@/composables/useAssetActions";
 import { useGenerateGuard } from "@/composables/useGenerateGuard";
 import { usePermission } from "@/composables/usePermission";
 import { usePolling } from "@/composables/usePolling";
@@ -666,12 +668,20 @@ function onVersionRestored(c: Content) {
   syncPolling();
 }
 
-// ---------- 素材 ----------
+// ---------- 素材（docs/10 §4.9、§7.5） ----------
 const editorRef = ref<InstanceType<typeof MarkdownEditor>>();
 const assets = ref<MediaAsset[]>([]);
 const assetsLoading = ref(false);
-const attachForm = reactive({ asset_id: undefined as number | undefined, usage_type: "inline" as "inline" | "cover" });
 const attaching = ref(false);
+const pickerVisible = ref(false);
+
+/** 绑定素材按 sort, id 排序（与 GET /contents/{id}/assets 一致） */
+const sortedAssets = computed(() => [...assets.value].sort((x, y) => (x.sort ?? 0) - (y.sort ?? 0) || x.id - y.id));
+const coverAsset = computed(() => {
+  const id = content.value?.cover_asset_id;
+  return id ? (assets.value.find((a) => a.id === id) ?? null) : null;
+});
+const boundIds = computed(() => assets.value.map((a) => a.id));
 
 async function loadAssets() {
   const id = contentId.value;
@@ -686,42 +696,86 @@ async function loadAssets() {
   }
 }
 
-function assetAlt(a: MediaAsset): string {
-  return (a.prompt ?? "").replace(/[\r\n[\]]+/g, " ").trim().slice(0, 60);
-}
-
-function escapeAttr(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
-/** 素材插入片段：Markdown `![alt](url)`，HTML `<img src alt>`（docs/09 §8.6） */
-function assetSnippet(a: MediaAsset): string {
-  const alt = assetAlt(a);
-  if (format.value === "html") return `<img src="${escapeAttr(a.url ?? "")}" alt="${escapeAttr(alt)}">`;
-  return `![${alt}](${a.url})`;
-}
-
+/** 插入标记：markdown `![alt](url)`、html `<img src alt>`、视频 `<video src controls></video>`；alt 取 prompt 前 50 字符，无则取标题 */
 async function insertAsset(a: MediaAsset) {
   if (!a.url || a.status !== "ready") return;
   if (!editable.value) {
     ElMessage.warning(t("editor.assets.readonly"));
     return;
   }
-  await editorRef.value?.insert(assetSnippet(a), true);
+  await editorRef.value?.insert(assetMarkup(a, format.value, form.title || content.value?.title || ""), true);
 }
 
-async function attachAsset(assetId: number, usage: "inline" | "cover") {
+function usageOf(a: MediaAsset): "cover" | "inline" {
+  return content.value?.cover_asset_id === a.id ? "cover" : "inline";
+}
+
+async function attachAsset(assetId: number, usage: "inline" | "cover", sort?: number) {
   const c = content.value;
   if (!c) return;
   attaching.value = true;
   try {
     const maxSort = assets.value.reduce((m, a) => Math.max(m, a.sort ?? 0), 0);
-    await contentsApi.attach(c.id, assetId, usage === "cover" ? { usage_type: "cover" } : { usage_type: "inline", sort: maxSort + 1 });
+    const existing = assets.value.find((a) => a.id === assetId);
+    await contentsApi.attach(c.id, assetId, { usage_type: usage, sort: sort ?? existing?.sort ?? maxSort + 1 }, { silent: true });
     ElMessage.success(usage === "cover" ? t("editor.assets.coverSet") : t("editor.assets.attached"));
-    attachForm.asset_id = undefined;
     await Promise.all([loadAssets(), reload(!dirty.value)]);
-  } catch {
-    /* 已提示（素材未就绪 / 非图片 / 不存在） */
+  } catch (err) {
+    const msg = describeAttachError(err, assets.value.find((a) => a.id === assetId));
+    if (msg) ElMessage.error(msg);
+  } finally {
+    attaching.value = false;
+  }
+}
+
+/** AssetPicker 选择后批量绑定：cover 只取单张图片，其余按顺序追加为 inline */
+async function onAssetsPicked(picked: MediaAsset[], usage: "cover" | "inline") {
+  const c = content.value;
+  if (!c || !picked.length) return;
+  attaching.value = true;
+  let ok = 0;
+  try {
+    let next = assets.value.reduce((m, a) => Math.max(m, a.sort ?? 0), 0) + 1;
+    for (const a of picked) {
+      const u = usage === "cover" && a.kind === "image" && picked.length === 1 ? "cover" : "inline";
+      try {
+        await contentsApi.attach(c.id, a.id, { usage_type: u, sort: next }, { silent: true });
+        next += 1;
+        ok += 1;
+      } catch (err) {
+        const msg = describeAttachError(err, a);
+        if (msg) ElMessage.error(`#${a.id}：${msg}`);
+      }
+    }
+    if (ok) ElMessage.success(usage === "cover" && ok === 1 ? t("editor.assets.coverSet") : t("editor.assets.attachedN", { n: ok }));
+    await Promise.all([loadAssets(), reload(!dirty.value)]);
+  } finally {
+    attaching.value = false;
+  }
+}
+
+/** 上移 / 下移：按新顺序重排 sort（1 起），只对 sort 变化的项调用 attach（用途不变） */
+async function moveAsset(a: MediaAsset, delta: -1 | 1) {
+  const c = content.value;
+  if (!c) return;
+  const list = [...sortedAssets.value];
+  const idx = list.findIndex((x) => x.id === a.id);
+  const target = idx + delta;
+  if (idx < 0 || target < 0 || target >= list.length) return;
+  [list[idx], list[target]] = [list[target], list[idx]];
+  attaching.value = true;
+  try {
+    for (let i = 0; i < list.length; i += 1) {
+      const item = list[i];
+      // attach 只接受 ready 素材（docs/10 §4.9）：进行中的素材（如生成中的封面）保持原 sort，避免改写其用途
+      if ((item.sort ?? 0) === i + 1 || item.status !== "ready") continue;
+      await contentsApi.attach(c.id, item.id, { usage_type: usageOf(item), sort: i + 1 }, { silent: true });
+    }
+    await loadAssets();
+  } catch (err) {
+    const msg = describeAttachError(err, a);
+    if (msg) ElMessage.error(msg);
+    await loadAssets();
   } finally {
     attaching.value = false;
   }
@@ -731,25 +785,35 @@ async function detachAsset(a: MediaAsset) {
   const c = content.value;
   if (!c) return;
   try {
-    await ElMessageBox.confirm(t("editor.assets.detachConfirm"), t("common.tip"), { type: "warning" });
+    await ElMessageBox.confirm(
+      c.cover_asset_id === a.id ? t("editor.assets.detachCoverConfirm") : t("editor.assets.detachConfirm"),
+      t("common.tip"),
+      { type: "warning" },
+    );
   } catch {
     return;
   }
   try {
-    await contentsApi.detach(c.id, a.id);
+    await contentsApi.detach(c.id, a.id, { silent: true });
     ElMessage.success(t("editor.assets.detached"));
     await Promise.all([loadAssets(), reload(!dirty.value)]);
-  } catch {
-    /* 已提示 */
+  } catch (err) {
+    const msg = describeAttachError(err, a);
+    if (msg) ElMessage.error(msg);
   }
 }
 
-function gotoImageGenerate() {
+/** 「生成配图 / 生成封面」：跳转图片工作台并预选本内容（from_content_prompt 默认开启，docs/10 §7.5） */
+function gotoImageGenerate(usage: "inline" | "cover" = "inline") {
   const c = content.value;
   if (!c) return;
-  // 「生成配图」：阶段 4 的 media/ImageGenerate.vue 读取 content_id / project_id 预填（docs/10 §7.5）
-  void router.push({ path: "/media/images", query: { content_id: String(c.id), project_id: String(c.project_id) } });
+  void router.push({
+    path: "/media/images",
+    query: { content_id: String(c.id), project_id: String(c.project_id), usage_type: usage, from_content_prompt: "1" },
+  });
 }
+
+const canGenerateImage = computed(() => has("media.images.view") && has("media.images.generate") && has("content.contents.update"));
 
 // ---------- 链接 ----------
 const links = ref<PublishLink[]>([]);
@@ -1083,8 +1147,28 @@ onBeforeUnmount(() => {
             </el-collapse-item>
 
             <el-collapse-item name="assets" :title="t('editor.panels.assets', { n: assets.length })">
-              <div v-loading="assetsLoading" class="panel">
-                <div v-for="a in assets" :key="a.id" class="asset">
+              <div v-loading="assetsLoading || attaching" class="panel">
+                <!-- 封面区：cover_asset_id 对应资产 -->
+                <div class="cover-box">
+                  <span class="cover-box__label">{{ t("editor.assets.cover") }}</span>
+                  <el-image
+                    v-if="coverAsset && (coverAsset.thumbnail_url || coverAsset.url)"
+                    :src="coverAsset.thumbnail_url || coverAsset.url || ''"
+                    fit="cover"
+                    class="cover-box__img"
+                    :preview-src-list="coverAsset.url ? [coverAsset.url] : []"
+                    preview-teleported
+                  >
+                    <template #error><div class="asset__broken">{{ t("editor.assets.broken") }}</div></template>
+                  </el-image>
+                  <span v-else-if="content.cover_asset_id" class="text-secondary">#{{ content.cover_asset_id }}</span>
+                  <span v-else class="text-secondary">{{ t("editor.assets.noCover") }}</span>
+                  <el-button v-if="canGenerateImage" size="small" link type="primary" :icon="MagicStick" @click="gotoImageGenerate('cover')">
+                    {{ t("editor.assets.generateCover") }}
+                  </el-button>
+                </div>
+
+                <div v-for="(a, idx) in sortedAssets" :key="a.id" class="asset">
                   <el-image
                     v-if="a.kind === 'image' && (a.thumbnail_url || a.url)"
                     :src="a.thumbnail_url || a.url || ''"
@@ -1095,12 +1179,14 @@ onBeforeUnmount(() => {
                   >
                     <template #error><div class="asset__broken">{{ t("editor.assets.broken") }}</div></template>
                   </el-image>
-                  <div v-else class="asset__thumb asset__placeholder"><el-icon><Picture /></el-icon></div>
+                  <video v-else-if="a.kind === 'video' && a.url" :src="a.url" preload="metadata" muted class="asset__thumb asset__video" />
+                  <div v-else class="asset__thumb asset__placeholder"><el-icon><component :is="a.kind === 'video' ? VideoCamera : Picture" /></el-icon></div>
                   <div class="asset__info">
                     <div class="asset__line">
                       <span class="mono">#{{ a.id }}</span>
                       <el-tag v-if="content.cover_asset_id === a.id" size="small" type="success">{{ t("editor.assets.cover") }}</el-tag>
                       <StatusTag v-else kind="media_usage_type" :value="a.usage_type" effect="plain" />
+                      <StatusTag v-if="a.kind === 'video'" kind="media_kind" :value="a.kind" effect="plain" />
                       <StatusTag v-if="a.status !== 'ready'" kind="media_status" :value="a.status" />
                     </div>
                     <div class="asset__prompt text-secondary" :title="a.prompt ?? ''">{{ a.prompt || "-" }}</div>
@@ -1114,38 +1200,39 @@ onBeforeUnmount(() => {
                           link
                           type="primary"
                           size="small"
-                          :disabled="a.status !== 'ready'"
-                          :loading="attaching"
+                          :disabled="a.status !== 'ready' || attaching"
                           @click="attachAsset(a.id, 'cover')"
                         >
                           {{ t("editor.assets.setCover") }}
                         </el-button>
-                        <el-button link type="danger" size="small" @click="detachAsset(a)">{{ t("editor.assets.detach") }}</el-button>
+                        <el-button link size="small" :icon="Top" :disabled="idx === 0 || attaching || a.status !== 'ready'" :title="t('editor.assets.moveUp')" @click="moveAsset(a, -1)" />
+                        <el-button link size="small" :icon="Bottom" :disabled="idx === sortedAssets.length - 1 || attaching || a.status !== 'ready'" :title="t('editor.assets.moveDown')" @click="moveAsset(a, 1)" />
+                        <el-button link type="danger" size="small" :disabled="attaching" @click="detachAsset(a)">{{ t("editor.assets.detach") }}</el-button>
                       </template>
                     </div>
                   </div>
                 </div>
                 <span v-if="!assetsLoading && !assets.length" class="text-secondary">{{ t("editor.assets.empty") }}</span>
-                <!--
-                  素材选择：AssetPicker.vue（从素材库挑选，阶段 4 提供）接入此处；在其就绪前提供按素材 ID 绑定的最小入口
-                  （POST /admin/contents/{id}/assets/{asset_id}/attach）。
-                -->
-                <div v-if="has('content.contents.update')" class="attach-row">
-                  <el-input-number v-model="attachForm.asset_id" :min="1" :controls="false" size="small" :placeholder="t('editor.assets.assetId')" style="width: 110px" />
-                  <el-select v-model="attachForm.usage_type" size="small" style="width: 100px">
-                    <el-option value="inline" :label="t('status.media_usage_type.inline')" />
-                    <el-option value="cover" :label="t('status.media_usage_type.cover')" />
-                  </el-select>
-                  <el-button size="small" type="primary" plain :disabled="!attachForm.asset_id" :loading="attaching" @click="attachAsset(attachForm.asset_id!, attachForm.usage_type)">
-                    {{ t("editor.assets.attach") }}
-                  </el-button>
-                </div>
                 <div class="attach-row">
-                  <el-button v-if="has('media.images.generate') && has('content.contents.update')" size="small" :icon="Picture" @click="gotoImageGenerate">
+                  <el-button v-if="has('content.contents.update') && has('media.assets.view')" size="small" type="primary" plain :icon="FolderOpened" @click="pickerVisible = true">
+                    {{ t("editor.assets.pick") }}
+                  </el-button>
+                  <el-button v-if="canGenerateImage" size="small" :icon="Picture" @click="gotoImageGenerate('inline')">
                     {{ t("editor.assets.generateImage") }}
                   </el-button>
                   <el-button size="small" text :icon="Refresh" @click="loadAssets" />
                 </div>
+                <AssetPicker
+                  v-if="has('content.contents.update') && has('media.assets.view')"
+                  v-model="pickerVisible"
+                  mode="content"
+                  :project-id="content.project_id"
+                  multiple
+                  :max="20"
+                  with-usage
+                  :exclude-ids="boundIds"
+                  @select="onAssetsPicked"
+                />
               </div>
             </el-collapse-item>
 
@@ -1501,8 +1588,36 @@ onBeforeUnmount(() => {
 }
 .attach-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
+}
+.asset__thumb.asset__placeholder {
+  width: 72px;
+  height: 72px;
+}
+.asset__video {
+  object-fit: cover;
+  background: #000;
+}
+.cover-box {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px;
+  border: 1px dashed var(--el-border-color);
+  border-radius: 6px;
+}
+.cover-box__label {
+  font-size: 12px;
+  font-weight: 600;
+}
+.cover-box__img {
+  width: 120px;
+  height: 68px;
+  border-radius: 4px;
+  overflow: hidden;
 }
 .attach-row .el-button {
   margin-left: 0;

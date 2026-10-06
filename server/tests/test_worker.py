@@ -315,6 +315,7 @@ def test_worker_start_tick_shutdown(gdb: Session, handlers: None, monkeypatch: p
     calls: list[str] = []
     monkeypatch.setattr(recover_stale_tasks, "recover", lambda: calls.append("recover") or {})
     worker = Worker(max_workers=3, poll_interval=0.01)
+    worker.cleanup = None  # 每日 cleanup_media 到点即提交，SQLite 单连接下与本测试的根任务并发写互相干扰（与本测试无关）
     try:
         worker.start()
         wait_idle(worker.pool)                         # 启动即执行的 recover / sync_models 完成后再领取（SQLite 单连接）
@@ -336,6 +337,7 @@ def test_worker_run_loop_exits_on_stop(gdb: Session, handlers: None, monkeypatch
     monkeypatch.setattr(recover_stale_tasks, "recover", lambda: {})
     monkeypatch.setattr(sync_models, "sync_models", lambda: {})
     worker = Worker(max_workers=2, poll_interval=0.01)
+    worker.cleanup = None
     ticks = {"n": 0}
     original = worker.tick
 

@@ -855,8 +855,11 @@ def cancel_task(db: Session, scope: DataScope, task_id: int, *, admin_id: int | 
         raise _conflict("同步执行的任务不可取消", {"current_status": task.status})
     if task.status not in ("queued", "polling"):
         raise _conflict("当前状态不可取消", {"current_status": task.status})
-    current = db.scalar(select(AiTask.status).where(AiTask.id == task.id))  # 读最新状态（worker 可能刚领取）
+    # 行锁重读最新状态（worker 可能刚领取，或媒体轮询正把根任务置终态；poll_media_tasks 同样 FOR UPDATE 后再写）
+    db.refresh(task, with_for_update=True)
+    current = task.status
     if current not in ("queued", "polling"):
+        db.rollback()
         raise _conflict("当前状态不可取消", {"current_status": current})
     spec = get_handler(task.operation)
     try:

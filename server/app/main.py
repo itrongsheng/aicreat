@@ -22,6 +22,8 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.routing import APIRoute
+from sqlalchemy import or_, select
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.api import api_router
 from app.api.health import app_version, check_public_base_url
@@ -30,7 +32,7 @@ from app.core.database import SessionLocal
 from app.core.exceptions import CODE_BAD_REQUEST, CODE_NOT_FOUND, BusinessError, register_exception_handlers, unhandled_exception_handler
 from app.core.locks import LockTimeout, with_lock
 from app.core.storage import InvalidStorageKey, LocalStorage, get_storage, guess_content_type, validate_storage_key
-from app.models import Admin
+from app.models import Admin, MediaAsset
 from app.services import admin_rbac_service, ai_gateway_service, settings_service
 
 logger = logging.getLogger("app.main")
@@ -306,13 +308,29 @@ def _configure_logging() -> None:
     logging.getLogger("app").setLevel(settings.log_level)
 
 
+def _stored_mime_type(key: str) -> str | None:
+    """``GET /media/{key}`` 的 ``Content-Type`` 取库内 ``media_assets.mime_type``（docs/10 §11.1）：按 ``storage_key`` /
+    ``thumbnail_key`` 匹配；无对应行（如 ``mock/`` 占位文件）或数据库不可用时返回 ``None``，由调用方按扩展名推断。"""
+    try:
+        with SessionLocal() as db:
+            return db.scalar(
+                select(MediaAsset.mime_type)
+                .where(or_(MediaAsset.storage_key == key, MediaAsset.thumbnail_key == key), MediaAsset.mime_type.is_not(None))
+                .order_by(MediaAsset.id.desc())
+                .limit(1)
+            )
+    except SQLAlchemyError:
+        logger.warning("查询素材 mime_type 失败 key=%s，按扩展名推断", key, exc_info=True)
+        return None
+
+
 def _media_response(key: str) -> Response:
     try:
         key = validate_storage_key(key)
     except InvalidStorageKey:
         raise BusinessError("非法的文件路径", code=CODE_BAD_REQUEST, http_status=400) from None
     storage = get_storage()
-    media_type = guess_content_type(key)
+    media_type = _stored_mime_type(key) or guess_content_type(key)
     headers = {"Cache-Control": "public, max-age=86400", "X-Content-Type-Options": "nosniff"}
     if isinstance(storage, LocalStorage):
         try:

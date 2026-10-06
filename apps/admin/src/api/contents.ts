@@ -164,6 +164,10 @@ export function detach(id: number, assetId: number, config: AxiosRequestConfig =
   return post<MediaAsset>(`/admin/contents/${id}/assets/${assetId}/detach`, undefined, config);
 }
 
+/** docs/10 §7 的命名（与 `attach` / `detach` 等价） */
+export const attachAsset = attach;
+export const detachAsset = detach;
+
 /** 该内容的回填链接（不分页） */
 export function listLinks(id: number, config: AxiosRequestConfig = {}): Promise<PublishLink[]> {
   return httpGet<PublishLink[]>(`/admin/contents/${id}/links`, undefined, config);

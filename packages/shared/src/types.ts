@@ -1832,3 +1832,57 @@ export interface ContentAttachBody {
 
 /** `GET /admin/contents/{id}/export?format=` */
 export type ContentExportFormat = "md" | "html" | "json";
+
+// =====================================================================
+// 媒体生成请求体（docs/04 §6.13、§7.8、§7.9；docs/10 §4.1、§5.1）
+// =====================================================================
+
+/** `POST /admin/media/images/generate`（`schemas/media.py::ImageGenerateBody`） */
+export interface ImageGenerateBody {
+  project_id: number;
+  /** `usage_type ∈ cover/inline` 时必填；`standalone` 时必须为空 */
+  content_id?: number | null;
+  usage_type: "cover" | "inline" | "standalone";
+  /** ≤ 4000 字符；`from_content_prompt=false` 时必填 */
+  prompt?: string | null;
+  from_content_prompt?: boolean;
+  /** 1~`media_config.image.max_count_per_request` */
+  count?: number;
+  resolution?: ImageResolution;
+  aspect_ratio?: AspectRatio;
+  /** ≤ `media_config.image.max_reference_images`；真实模式须公网（否则 4222） */
+  reference_image_urls?: string[];
+  model?: string | null;
+}
+
+/** `POST /admin/media/videos/generate`（`schemas/media.py::VideoGenerateBody`） */
+export interface VideoGenerateBody {
+  project_id: number;
+  /** 仅 `usage_type=inline` 时必填；`standalone` 时必须为空 */
+  content_id?: number | null;
+  usage_type: "inline" | "standalone";
+  prompt: string;
+  negative_prompt?: string | null;
+  /** 1~`media_config.video.max_duration` 秒 */
+  duration?: number;
+  resolution?: VideoResolution;
+  /** `{w}:{h}`，与 `size` 二选一 */
+  aspect_ratio?: string | null;
+  /** `{w}x{h}`，与 `aspect_ratio` 二选一 */
+  size?: string | null;
+  /** 图生视频；不得与 `first_frame_image_url` 同时传 */
+  input_reference?: string | null;
+  reference_image_urls?: string[];
+  reference_video_urls?: string[];
+  reference_audio_urls?: string[];
+  first_frame_image_url?: string | null;
+  /** 须与 `first_frame_image_url` 同时出现 */
+  last_frame_image_url?: string | null;
+  generate_audio?: boolean;
+  model?: string | null;
+}
+
+/** 4222 参考素材 URL 非公网的 `data` */
+export interface PublicUrlRequiredData {
+  urls: string[];
+}
