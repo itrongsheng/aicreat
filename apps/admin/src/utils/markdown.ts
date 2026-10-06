@@ -41,3 +41,38 @@ export function sanitizeHtml(html: string): string {
 export function renderMarkdown(source: string | null | undefined): string {
   return sanitizeHtml(md.render(source ?? ""));
 }
+
+const CJK_RE = /[぀-ヿ㐀-䶿一-鿿豈-﫿가-힯]/g;
+
+/** 去掉 Markdown 标记语法（标题符号、强调符号、链接保留文字、图片整体移除、代码围栏符号） */
+function stripMarkdown(source: string): string {
+  return source
+    .replace(/^\s*(```|~~~).*$/gm, " ")
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, " ")
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/^\s{0,3}#{1,6}\s+/gm, "")
+    .replace(/^\s{0,3}>\s?/gm, "")
+    .replace(/^\s*([-*+]|\d+\.)\s+/gm, "")
+    .replace(/[*_~`]+/g, "");
+}
+
+/** 去 HTML 标签与常见实体 */
+function stripHtml(source: string): string {
+  return source
+    .replace(/<(script|style)[\s\S]*?<\/\1>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&[a-z]+;|&#\d+;/gi, " ");
+}
+
+/**
+ * 字数（与后端 `content_service.count_words` 口径一致，docs/09 §8.9）：
+ * Markdown 去标记 / HTML 去标签后，CJK 字符每个计 1，其它按空白切分的词每个计 1。
+ */
+export function countWords(body: string | null | undefined, format: "markdown" | "html" = "markdown"): number {
+  if (!body) return 0;
+  const text = format === "html" ? stripHtml(body) : stripMarkdown(body);
+  const cjk = text.match(CJK_RE)?.length ?? 0;
+  const rest = text.replace(CJK_RE, " ").split(/\s+/).filter((w) => /[\p{L}\p{N}]/u.test(w)).length;
+  return cjk + rest;
+}
