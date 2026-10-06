@@ -54,7 +54,7 @@ flowchart LR
 | `all` | 全部数据（总后台） | 全部项目及其下数据，以及不归属任何项目的系统数据（系统告警、健康探测任务、未匹配的用量日志）；可用 `owner_id` 收窄到某一用户（§6.2） |
 | `own` | 仅本人 | `projects.owner_id = 本人` 的项目及其下数据、本人上传的参考素材（尚未绑定到内容、`project_id` 为空）、本人的操作日志 |
 
-枚举名 `data_scope`：后端在 `server/app/models.py` 顶部以 `Literal` 声明，前端在 `packages/shared/src/enums.ts` 以 `DATA_SCOPE` 导出（`as const`），与其它枚举的约定相同（[00-overview](./00-overview.md) §8.5）。
+枚举名 `data_scope`：后端在 `server/app/models.py` 顶部以 `Literal` 声明，前端在 `packages/shared/src/enums.ts` 以 `DATA_SCOPE` 导出（`as const`），与其它枚举的约定相同（[00-overview](./00-overview.md) §8；取值登记在 §8.5）。
 
 ### 3.2 系统用户组的默认值
 
@@ -100,7 +100,7 @@ flowchart LR
 | `capability_routes` | `project_id = 0 OR project_id IN P` | 全局路由是平台配置，项目覆盖行随项目 |
 | `alerts` | `project_id IN P` | `project_id` 为 NULL 的系统告警（AI 网关、worker）只对总后台可见（§11） |
 | `daily_stats` | `project_id IN P`（`project_id > 0`） | `project_id = 0` 的汇总行只在总后台未按用户筛选时使用（§10） |
-| `admin_operation_logs` | `admin_id = 当前用户`（不受 `owner_id` 参数影响） | 普通用户只看自己的操作记录 |
+| `admin_operation_logs` | `own`：`admin_id = 本人`；`all`（无论是否带 `owner_id`）：不加条件，按用户筛选用原有 `admin_id` 参数（§6.2） | 普通用户只看自己的操作记录 |
 
 ### 4.3 不受数据范围约束的资源
 
@@ -110,8 +110,9 @@ flowchart LR
 | --- | --- |
 | `settings`、`ai_models`、全局 `capability_routes`（`project_id = 0`）、`publish_platforms` | 平台配置。`GET /admin/platforms` 返回的 `link_count` 例外，只统计可见链接 |
 | `admins`、`admin_groups`、`admin_permissions` | 安全模块（用户、用户组、权限） |
-| `GET /admin/ai/health`、`POST /admin/ai/health/probe`、`POST /admin/ai/routes/{id}/test`、`POST /admin/ai/routes/{id}/reset-breaker`、`POST /admin/ai/models/sync`、`POST /admin/ai/usage/reconcile`、`POST /admin/stats/recompute` | 运维动作，不返回业务数据 |
+| `GET /admin/ai/health`、`POST /admin/ai/health/probe`、`POST /admin/ai/routes/{id}/test`、`POST /admin/ai/routes/{id}/reset-breaker`（目标为项目覆盖行（`project_id > 0`）时须属于 P，否则 404，§8）、`POST /admin/ai/models/sync`、`POST /admin/ai/usage/reconcile`、`POST /admin/stats/recompute` | 运维动作，不返回业务数据 |
 | `GET /admin/monitoring/overview` 中的 `queued`、`workers`、`daily_limits` | 平台运行状态；同一响应中的 `due` / `today` / `last_run_at` 按范围计算（§6.3） |
+| `GET /admin/ai/usage/last-pull`（`ai:usage:last_pull` 摘要） | 平台运行状态；计数与 `request_ids[]` 只在 `all` 范围且未带 `owner_id` 时返回，`own` 范围（或带 `owner_id`）只返回 `pulled_at` / `window_overflow` |
 
 这些能力本质上是总后台职能。建议只把 `security.*`、`system.settings.*`、`ai.models.sync`、`ai.routes.create/update/delete/test/reset_breaker`、`ai.usage.reconcile`、`publish.platforms.create/update/delete/test`、`stats.reports.recompute` 授予 `all` 范围的用户组。系统组的默认权限已经满足这一点（`operator` 不含这些码），前端在给 `own` 组勾选这些码时会给出提示（§12.3）。
 
@@ -136,11 +137,11 @@ flowchart LR
 - **列表、导出、统计**：按 §4.2 的条件过滤，`total` 只计可见行。
 - **详情与对象级动作**：目标不可见与目标不存在作同样处理（§8）。
 - **筛选参数引用了不可见对象**（如 `project_id`、`content_id`、`link_id`、`batch_id`、`target_id`）：与范围取交集后返回空列表，不报错。
-- **嵌套对象与冗余计数**同样受范围约束：链接详情中的 `content` 摘要、素材详情中的 `references.referenced_by_asset_ids` 只列出可见对象；`GET /admin/platforms` 的 `link_count` 只统计可见链接。`GET /admin/projects` 的 `counts{}` 本就限于该项目，无需特别处理。
+- **嵌套对象与冗余计数**同样受范围约束：链接详情中的 `content` 摘要、素材详情中的 `reference_asset_ids` 与 `references.referenced_by_asset_ids` 只列出调用者可见的素材，`references.count` 按过滤后的结果计算（删除保护 409 `in_use` 仍按全部引用判断，§7.1）；`GET /admin/platforms` 的 `link_count` 只统计可见链接。`GET /admin/projects` 的 `counts{}` 本就限于该项目，无需特别处理。
 
 ### 6.2 `owner_id` 查询参数
 
-- 所有受数据范围约束的列表、导出、统计接口，以及 `GET /admin/alerts/summary`、`GET /admin/monitoring/overview`、`GET /admin/ai/usage/summary`，都接受可选查询参数 `owner_id`（正整数）。`GET /admin/projects` 原有的 `owner_id` 筛选就是这个参数。
+- 所有受数据范围约束的列表、导出、统计接口，以及 `GET /admin/alerts/summary`、`GET /admin/monitoring/overview`、`GET /admin/ai/usage/summary`，以及 `POST /admin/monitoring/link-checks/run`、`POST /admin/monitoring/index-checks/run`（§7.5），都接受可选查询参数 `owner_id`（正整数）。`GET /admin/projects` 原有的 `owner_id` 筛选就是这个参数。
 - **`all` 范围**：给出 `owner_id` 时，把 P 收窄为该用户负责的项目，素材另加 `project_id IS NULL AND created_by = owner_id`。不归属任何项目的系统数据（系统告警、探测任务、未匹配的用量日志）不出现在结果中，因此结果与该用户本人看到的完全一致，即「用户视角」。服务端不校验该用户是否存在或已禁用，已禁用用户的历史数据仍可查看。`admin_operation_logs` 不适用此参数，按用户筛选请用它原有的 `admin_id` 参数。
 - **`own` 范围**：忽略 `owner_id`（恒为本人），不报错。
 
@@ -153,16 +154,16 @@ flowchart LR
 | `/admin/keywords*`、`/admin/titles*`、`/admin/contents*`、`/admin/generation-batches*` | 按 `project_id IN P` 过滤；生成、导入、手工新增的 `project_id` 须属于 P | 引用校验见 §7.1 |
 | `/admin/media*`、`/admin/uploads*` | 按 §4.2 过滤；生成的 `project_id` 须属于 P；上传的素材归上传人 | 上传见 §7.4 |
 | `/admin/ai/models*` | 不受约束 | 全局模型目录 |
-| `/admin/ai/routes*` | 列表返回全局行与 P 内项目的覆盖行；`?project_id=` 指向不可见项目时只返回全局行；新建 / 编辑 / 删除项目覆盖行要求项目属于 P | 全局行的写入只看权限码 |
+| `/admin/ai/routes*` | 列表返回全局行与 P 内项目的覆盖行；`?project_id=` 指向不可见项目时只返回全局行；新建 / 编辑 / 删除项目覆盖行要求项目属于 P；`GET /{id}`、`test`、`reset-breaker` 的目标为项目覆盖行时须属于 P（否则 404） | 全局行的写入只看权限码 |
 | `/admin/ai/tasks*` | 按 `project_id IN P` 过滤；`retry` / `cancel` 的目标须可见；`export` 同列表 | 探测任务只对总后台可见 |
-| `/admin/ai/usage/logs`、`/summary` | 只含匹配到可见尝试行的日志；`summary` 只汇总可见尝试行，`group_by=project` 只列 P | `reconcile` 不受约束 |
+| `/admin/ai/usage/logs`、`/summary`、`/last-pull` | 只含匹配到可见尝试行的日志；`summary` 只汇总可见尝试行，`group_by=project` 只列 P；`last-pull` 只返回 `pulled_at` / `window_overflow`（§4.3） | `reconcile` 不受约束 |
 | `/admin/platforms*` | 平台本身不受约束；`link_count` 只计可见链接 | `test` / `detect` 不受约束 |
 | `/admin/links*` | 按 `project_id IN P` 过滤；回填的 `content_id` 须可见 | URL 冲突见 §8 |
 | `/admin/monitoring/overview` | `due` / `today` / `last_run_at` 只按可见链接及其检测记录计算；`queued` / `workers` / `daily_limits` 为平台值 | — |
 | `/admin/monitoring/link-checks*`、`index-checks*` | 经所属链接过滤；`run` 见 §7.5 | — |
 | `/admin/alerts*` | 见 §11 | — |
 | `/admin/stats*` | 见 §10 | `recompute` 不受约束 |
-| `/admin/admin-operation-logs` | 只返回 `admin_id = 本人` 的记录，`admin_id` 参数被忽略 | 总后台不受约束 |
+| `/admin/admin-operation-logs` | `own`：只返回 `admin_id = 本人` 的记录，`admin_id` 参数被忽略；`owner_id` 对本接口不生效 | 总后台（无论是否带 `owner_id`）不受约束，见 §6.2 |
 | `/admin/settings*`、`/admin/admins*`、`/admin/admin-groups*`、`/admin/admin-permissions*` | 不受约束 | 只由权限码控制 |
 | `/admin/auth/*` | `login` / `me` 返回 `data_scope` | [07-admin-rbac](./07-admin-rbac.md) §6.1 |
 
@@ -174,6 +175,8 @@ flowchart LR
 | --- | --- |
 | `all` | 全部 `is_active=1` 的用户，加上仍负责至少一个项目的已禁用用户；按 `display_name`（为空时用 `username`）排序 |
 | `own` | 只返回本人一项 |
+
+按 `scope.is_all`（用户组的 `data_scope`）判定，不受 `owner_id` 查询参数影响：总后台处于用户视角（`owner_id` 已附加）时仍返回全部候选，`owner_options` 不得使用 `scope.restricted`。
 
 ```http
 GET /api/v1/admin/projects/owner-options
@@ -201,8 +204,8 @@ Authorization: Bearer <admin-jwt>
 任何写接口，只要路径或请求体引用了受范围约束的对象，都先校验其可见性：`project_id`、`content_id`、`keyword_id(s)`、`title_id(s)`、`asset_id`、`link_id(s)`、`template_id`、`batch_id`、`ids[]`。不可见的引用一律按「不存在」处理（§8）。原有的跨对象一致性规则不变，例如标题生成的 `keyword_ids` 必须属于 `project_id`、`attach` 要求 `asset.project_id ∈ {NULL, content.project_id}`。
 
 - 生成接口的 `template_id` 必须可见：全局已发布模板，或 P 内项目的模板。普通用户不能使用其他用户项目的专属模板。
-- `PUT /admin/projects/{id}` 的 `default_templates` 只能引用可见的 `published` 模板。
-- 参考素材 URL（`reference_image_urls` 等）本身就是公网地址，不做归属校验。把 URL 反解为 `reference_asset_ids_json` 属于内部记账，不受范围约束，以保证删除保护（`409 in_use`）对所有引用都生效；但素材详情的 `references` 只向调用者列出可见的引用方。
+- `POST /admin/projects` 与 `PUT /admin/projects/{id}` 的 `default_templates` 只能引用可见的 `published` 模板（不可见按不存在处理，400 `type=not_published`），且模板 `project_id ∈ {0, 该项目 id}`（否则 400 `type=project_mismatch`；总后台也不能把其他项目的专属模板设为本项目默认；新建项目时即只能引用全局模板），与生成接口 `template_id` 的规则一致（[04-api-spec](./04-api-spec.md) §7.3）。因此 §7.3 运行期解析只会用到全局模板或本项目模板，项目转移负责人时无需改写引用。
+- 参考素材 URL（`reference_image_urls` 等）本身就是公网地址，不做归属校验。把 URL 反解为 `reference_asset_ids_json` 属于内部记账，不受范围约束，以保证删除保护（`409 in_use`）对所有引用都生效；但素材详情的 `reference_asset_ids` 与 `references` 只向调用者列出可见的素材（§6.1）。
 
 ### 7.2 项目负责人
 
@@ -224,7 +227,7 @@ Authorization: Bearer <admin-jwt>
 - **编辑**（`PUT`）：目标须可见。对可见的全局 `published` 模板调用 `PUT`，会按 [09-generation-pipeline](./09-generation-pipeline.md) 的规则复制为同 code 的新 `draft`（`created_by` 为本人，仅本人与总后台可见），不影响其他用户。
 - **发布、归档、删除**：目标须可见。普通用户只能作用于自己项目的模板和自己创建的全局草稿，而且这些权限码默认不在 `operator` 组。
 - **复制、预览、版本列表**：源模板须可见；版本列表只列可见版本。
-- **运行期解析**：`resolve_template(kind, project_id, language)` 在任务创建时和 worker 中按项目解析，不受请求者的数据范围影响，因为项目模板只属于该项目。
+- **运行期解析**：`resolve_template(kind, project_id, language)` 在任务创建时和 worker 中按项目解析，不受请求者的数据范围影响，因为 `default_templates` 与 `template_id` 都只能引用全局模板或本项目模板（§7.1）。
 
 ### 7.4 素材上传
 
@@ -235,8 +238,8 @@ Authorization: Bearer <admin-jwt>
 ### 7.5 批量接口
 
 - `POST /admin/keywords/batch-status`、`POST /admin/titles/batch-status`、`POST /admin/alerts/batch-resolve`：不可见的 ID 计入 `skipped[]`，原因 `not_found`，与不存在的 ID 相同。
-- `POST /admin/links/batch`：逐条按单条规则校验，`content_id` 不可见的条目返回 `ok=false, code=404`。
-- `POST /admin/monitoring/link-checks/run`、`POST /admin/monitoring/index-checks/run`：不可见的 `link_ids` 计入 `skipped`；`project_id` 不可见时返回 `{enqueued:0, skipped:0}`；两者都未给出时，普通用户只对自己的链接入队。
+- `POST /admin/links/batch`：逐条按单条规则校验，`content_id` 不可见的条目返回 `ok=false, code=404`；`url_hash` 命中不可见链接的条目返回 `ok=false, code=409, link_id=null, reason="owned_by_other"`，`message`「该链接已由其他用户回填」（同 §8，不返回对方链接 ID）。
+- `POST /admin/monitoring/link-checks/run`、`POST /admin/monitoring/index-checks/run`：不可见的 `link_ids` 计入 `skipped`；`project_id` 不可见时返回 `{enqueued:0, skipped:0}`；两者都未给出时，`scope.restricted`（普通用户本人，或总后台带 `owner_id`）只对 `scope.owner_id` 负责项目下的链接入队。
 
 ## 8. 错误语义与防探测
 
@@ -316,7 +319,7 @@ FastAPI 在同一请求内缓存依赖结果，`require_permission` 与 `get_dat
 | `get_visible(db, scope, model, obj_id)` | 读取对象并判断可见性；不存在或不可见都抛 `BusinessError("对象不存在", code=404, http_status=404)` |
 | `require_project(db, scope, project_id, *, active=False) -> Project` | 写入口：项目须可见；`active=True` 时 `archived` 按原规则返回 409 `current_status` |
 | `is_visible(db, scope, obj) -> bool` | 对已加载的对象判断可见性，供批量接口逐条使用 |
-| `owner_options(db, scope) -> list[dict]` | §6.4 |
+| `owner_options(db, scope) -> list[dict]` | §6.4；按 `scope.is_all` 判定，忽略 `scope.owner_id` |
 
 谓词全部以子查询表达，由 `projects` 的 `uq_projects_owner_id_name`（最左前缀 `owner_id`）与各表已有的 `project_id` 前缀索引支撑，不需要额外的 Redis 缓存。
 
@@ -335,6 +338,7 @@ FastAPI 在同一请求内缓存依赖结果，`require_permission` 与 `get_dat
   - `ai_tasks` 的尝试行复制根任务的 `project_id`（已有规则，[03-data-model](./03-data-model.md) B.15）。
   - `index_check_service` 创建的收录检测根任务写 `project_id = link.project_id`。
   - 媒体内嵌的 `image_prompt` 根任务写宿主资产的 `project_id`。
+  - 重试与回退新建的根任务（`POST /admin/ai/tasks/{id}/retry`、批次 `retry`、`POST /admin/media/assets/{id}/retry`、`recover_stale_tasks` ① 自动重试、`poll_media_tasks` 轮询阶段 `media_storage` 备选回退）复制旧根任务的 `project_id`；仅健康探测 / 路由测试根任务 `project_id` 为 NULL。
 - 频控键 `rate:*:{admin_id}` 本来就按用户计数；额度键 `quota:daily:{date}` 全平台共享，`quota:project:{project_id}:{yyyy-mm}` 按项目计数（按用户的额度见 §15）。
 
 ## 10. 统计与报表的范围
@@ -352,7 +356,7 @@ FastAPI 在同一请求内缓存依赖结果，`require_permission` 与 `get_dat
 | `project_id=0` | 取 `daily_stats.project_id=0` 的汇总行（含不归属项目的数据） | 取 P 内各项目行，按相同的 `dimension` / `dimension_key` 求和。流量列和快照列都可以相加：快照按链接计数，各项目的链接集合互不相交 |
 | `project_id>0` | 取该项目行（不校验项目是否存在） | 项目须属于 P，否则 404 |
 | 当前值指标（`*_total`、`*_by_status`、`seo_index_rate` 等） | 按 `project_id` 筛选 | 附加 `project_id IN P` |
-| 今日兜底 `stats:rt` | `stats:rt:{date}:{project_id}` | 用 pipeline 逐项目 `HGETALL stats:rt:{date}:{pid}`（pid ∈ P），按字段求和 |
+| 今日兜底 `stats:rt` | `stats:rt:{date}:{project_id}` | 是否已聚合以今日 `project_id=0` 的 `total` 行是否存在为准（各范围一致）：存在时对 P 内今日项目行求和（无行计 0），`today_source=daily_stats`；不存在时用 pipeline 逐项目 `HGETALL stats:rt:{date}:{pid}`（pid ∈ P），按字段求和，`today_source=realtime`；二者不叠加 |
 | `alerts_open` / `alerts_opened` / `alerts_resolved` | 全部告警 | 只含 P 内项目的告警，不计系统告警 |
 | `*_by_engine` | `project_id=0` 的引擎行（启用引擎每日必写） | 引擎集合取同一 `snapshot_date` 下 `project_id=0` 引擎行的键（即启用中的引擎）；`hit` = P 内项目引擎行之和（无行计 0），`total` = P 内 `links_total_snapshot` 之和，`total=0` 时 `rate=null` |
 | `breakdown?dimension=project`、`rankings?type=top_cost_projects` | 全部项目 | 只含 P |
@@ -371,7 +375,7 @@ FastAPI 在同一请求内缓存依赖结果，`require_permission` 与 `get_dat
 - `metric` 的规则与 `dimension=project` 相同：可以是 `total` 行的任一列及其派生指标；忽略 `project_id` 参数。
 - 归属以**当前**负责人为准：项目转移后，其历史统计随之归到新负责人名下，与可见性规则一致。
 - `own` 范围只返回本人一行；总后台带 `owner_id` 时只返回该用户一行。
-- 报表页「分解」Tab 与「AI 消耗」Tab 的「按用户分解表」使用此维度，只在总后台显示（§12.3）；维度键候选的取法相同（[12-dashboard-reports](./12-dashboard-reports.md) §6.2）。
+- 报表页「分解」Tab 与「AI 消耗」Tab 的「按用户分解表」使用此维度，只在总后台显示，AI 消耗 Tab 中另要求 `project_id=0`（§12.3）；维度键候选的取法相同（[12-dashboard-reports](./12-dashboard-reports.md) §6.2）。
 
 ### 10.4 缓存键
 
@@ -406,7 +410,8 @@ FastAPI 在同一请求内缓存依赖结果，`require_permission` 与 `get_dat
 
 - 只在 `isAllScope && has("content.projects.view")` 时渲染，位于顶栏 `ProjectSelect` 左侧。选项来自 `GET /admin/projects/owner-options`（缓存在 `store/project.ts`），首项为「全部用户」（值 0）。
 - 当前值保存在 `store/project.ts` 的 `ownerId`，持久化到 localStorage 键 `aicreat.owner_id`。切换时把 `currentId` 重置为 0，并重新加载项目列表（`GET /admin/projects?status=active&owner_id=`）。
-- `api/client.ts` 的请求拦截器：`ownerId > 0` 时为 **GET** 请求自动附加 `owner_id`（请求已显式携带时不覆盖）；写请求不附加。普通用户不渲染切换器，也不附加该参数。
+- `api/client.ts` 的请求拦截器：`ownerId > 0` 时为 **GET** 请求，以及 `POST /admin/monitoring/link-checks/run`、`POST /admin/monitoring/index-checks/run`，自动附加查询参数 `owner_id`（请求已显式携带时不覆盖）；其它写请求不附加。普通用户不渲染切换器，也不附加该参数。
+- 用户视角下的写操作以总后台本人身份执行：上传素材（§7.4）、新建全局模板草稿、对全局 `published` 模板 `PUT` 产生的新草稿（§7.3）均归属总后台本人，在该用户视角中不可见。`ownerId > 0` 时，`ImageUpload.vue` 与 `prompt-templates/Index.vue` 的新建 / 编辑全局模板入口提示「将归属到你本人，返回全部用户后可见」；保存全局模板后若需跳转到新草稿，先把 `ownerId` 置 0。`projects/Index.vue` 新建表单的「负责人」缺省取 `ownerId`。
 - `ownerId > 0` 时，内容区顶部显示 `el-alert`「正在查看用户 {name} 的数据」，并提供「返回全部用户」按钮。
 - 登录、退出、切换账号时清空 `ownerId` 与 `currentId`，避免沿用上一个账号的选择；持久化的 `currentId` 不在可见项目列表中时重置为 0；统计接口返回 404（项目已不可见）时同样重置为 0 后重新请求。
 
@@ -415,12 +420,13 @@ FastAPI 在同一请求内缓存依赖结果，`require_permission` 与 `get_dat
 | 页面 | 改动 |
 | --- | --- |
 | `Dashboard.vue` | 标题按范围显示「总览」（总后台）或「我的数据」（`own`）；依据 `meta.scope` 显示范围徽标；告警摘要只含可见告警 |
-| `stats/Reports.vue` | `isAllScope` 时，分解维度下拉增加「用户」（`owner`），AI 消耗 Tab 增加「按用户分解表」；项目筛选只列可见项目 |
+| `stats/Reports.vue` | `isAllScope` 时，分解维度下拉增加「用户」（`owner`），AI 消耗 Tab 增加「按用户分解表」（仅 `project_id=0` 时显示）；项目筛选只列可见项目 |
 | `projects/Index.vue` | 总后台的列表增加「负责人」列与筛选；新建 / 编辑表单的「负责人」下拉取自 `owner-options`，`own` 范围隐藏该字段；转移负责人时二次确认「项目及其下全部数据将转给 {name}」 |
 | `admin-groups/Index.vue` | 基本信息表单增加「数据范围」单选：「全部数据（总后台）」/「仅本人负责的项目」，`super_admin` 组禁用；列表显示数据范围标签；`own` 组勾选 §4.3 所列权限码时，在权限树上方提示「这些权限属于总后台职能，不受数据范围限制」 |
 | `admins/Index.vue`（用户管理） | 列表增加「数据范围」列（取所属用户组）；用户组下拉每项显示该组的数据范围 |
 | `links/Index.vue`、`components/LinkBackfillDialog.vue` | 回填返回 409 且 `reason=owned_by_other` 时提示「该链接已由其他用户回填」 |
 | `prompt-templates/Index.vue` | 普通用户新建全局模板时提示「草稿仅自己可见，需由总后台发布」；409 `owned_by_other` 时提示「模板代码已被其他用户使用」 |
+| `ai/Usage.vue` | 顶部对账摘要（`GET /admin/ai/usage/last-pull`）的计数仅在 `isAllScope` 且未处于用户视角时显示，否则只显示拉取时间与 `window_overflow` 警示 |
 | 其它列表页 | 无改动：由后端过滤，并由拦截器附加 `owner_id` |
 
 ### 12.4 共享类型
@@ -465,7 +471,7 @@ export interface OwnerOption { id: number; username: string; display_name: strin
 4. 新建 `ix_media_assets_created_by_created_at`。
 5. 迁移完成后清除 Redis `cache:stats:*`。
 
-上线前，总后台需要在「项目」页核对每个项目的负责人，必要时转移。升级之后，`operator` 组的用户只能看到自己负责的项目。
+上线前，总后台需要在「项目」页核对每个项目的负责人，必要时转移。升级之后，`operator` 组与全部既有自定义组（第 1 步缺省为 `own`）的用户只能看到自己负责的项目；需要查看全部数据的自定义组，请在升级后于用户组页改为 `all`。
 
 ## 15. 非目标与后续扩展
 
@@ -483,19 +489,20 @@ export interface OwnerOption { id: number; username: string; display_name: strin
 夹具：`operator` 组用户 A、B（`own`），`reviewer` 组用户 R（`all`），超管 S；项目 PA（负责人 A）、PB（负责人 B），两个项目下各有关键词、标题、内容与版本、批次、AI 根任务与尝试行、素材、回填链接与检测记录、项目告警和 `daily_stats` 行；另有一条系统告警、一个探测任务、一条未匹配的用量日志，以及 A 上传的一条未归属项目的参考素材。
 
 - **范围计算**：各组的 `get_data_scope` 结果；`super_admin` 短路为 `all`；`own` 范围忽略 `owner_id` 参数；`all` 范围带 `owner_id` 时 `restricted=True`；`cache_key` 的两种取值。
-- **列表隔离**：§6.3 中每个受约束的列表与导出接口，A 只看到 PA 的数据且 `total` 正确，B 只看到 PB 的数据，R 与 S 看到两者；S 带 `owner_id=A` 的结果与 A 本人的结果逐 ID 相同。
+- **列表隔离**：§6.3 中每个受约束的列表与导出接口（`/admin/admin-operation-logs` 除外，见 §6.2；该接口另见「操作日志」条），A 只看到 PA 的数据且 `total` 正确，B 只看到 PB 的数据，R 与 S 看到两者；S 带 `owner_id=A` 的结果与 A 本人的结果逐 ID 相同。
 - **详情与动作**：A 对 PB 的对象执行 GET / PUT / 对象级 POST / DELETE 均返回 404，响应体与访问不存在的 ID 完全相同；批量接口中 PB 的 ID 计入 `skipped`（`not_found`）。
 - **引用校验**：A 以 `project_id=PB` 生成、导入、新增，或用 PB 的项目模板 `template_id`、回填 PB 的内容、`attach` PB 的素材，响应均与引用不存在的 ID 相同。
-- **冲突**：A 回填 PB 已回填的 URL → 409 `existing_id=null, reason=owned_by_other`；R 回填同一 URL → 409 带 `existing_id`；模板 code 冲突同理。
+- **冲突**：A 回填 PB 已回填的 URL → 409 `existing_id=null, reason=owned_by_other`；R 回填同一 URL → 409 带 `existing_id`；A 在 `POST /admin/links/batch` 中提交 PB 已回填的 URL → 该条目 `code=409`、`link_id=null`、`reason=owned_by_other`；模板 code 冲突同理。
 - **项目负责人**：A 创建的项目负责人为 A；A 指定 `owner_id=B` → 400 `owner_forbidden`；S 为 A 创建的项目 A 可见；S 把 PA 转移给 B 后，A 访问返回 404、B 可见，统计与告警随之转移，统计缓存被清除；不同负责人可以有同名项目，同一负责人下重名 409；转移给已有同名项目的用户返回 409；指定已禁用用户 → 400 `owner_unavailable`。
 - **owner-options**：A 只得到本人；S 得到全部启用用户和仍负责项目的已禁用用户，`project_count` 正确。
 - **模板**：全局已发布模板对所有人可见；A 的全局草稿对 B 不可见、对 S 可见；B 对全局已发布模板 `PUT` 得到属于 B 的新草稿，A 不可见。
 - **素材**：A 上传的参考素材（`project_id` 为空）只有 A 与 S 可见，B 的 `AssetPicker` 查询不到；A 把它绑定到 PA 的内容后随 PA 归属；`reference_asset_ids` 反解不受范围影响，删除保护（409 `in_use`）对其他用户的引用同样生效，而素材详情的 `references` 只列出可见的引用方。
+- **用户视角下的写入**：S 在 A 的用户视角下，`link-checks/run` 不带 `project_id` 只对 PA 的链接入队；对全局已发布模板 `PUT` 得到的草稿在 `owner_id=A` 下不可见、去掉 `owner_id` 后可见；上传的参考素材同理。
 - **AI**：AI 任务列表与导出按项目过滤；探测任务只对 S 可见；用量日志中未匹配条目只对 S 可见，匹配到 PA 尝试行的条目 A 可见；`usage/summary` 按范围汇总。
 - **监控**：`monitoring/overview` 的 `due` / `today` 按范围计算，`queued` / `workers` 为平台值；`run` 时 PB 的 `link_ids` 计入 `skipped`。
 - **告警**：PB 的链接告警对 A 不可见；系统告警只对 S 与 R 可见；`summary` 计数按范围；`batch-resolve` 中 PB 的 ID 计入 `skipped`。
 - **统计**：A 的总览等于 PA 各行之和（流量列、快照列、`*_by_engine`）；S 带 `owner_id=A` 的总览与 A 的结果相同，且使用同一缓存键；A 请求 `project_id=PB` → 404；`breakdown?dimension=owner` 对 S 返回每位负责人一行、已删除项目归入键 `0`，对 A 只返回本人一行；`all` 与 `owner:{id}` 的缓存键不同；今日实时兜底对 P 内各项目求和。
-- **操作日志**：A 只看到自己的记录。
+- **操作日志**：A 只看到自己的记录；S 带 `owner_id=A` 时仍看到全部记录，按 `admin_id=A` 筛选才只看到 A 的记录。
 - **用户组**：新建自定义组缺省 `own`；修改 `data_scope` 后无需重新登录即生效（旧令牌仍有效，下一次请求按新范围过滤），并写审计；把 `super_admin` 的 `data_scope` 改为 `own` → 403；`ensure_rbac_seed` 不改写其它系统组已调整的值。
 - **路由覆盖**：`test_scoped_routes_declare_data_scope`（§9.3）。
 

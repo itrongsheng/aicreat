@@ -82,7 +82,7 @@
 { "code": 403, "message": "无权执行此操作", "data": { "permission": "content.contents.review" } }
 ```
 
-`require_permission` 拒绝时 `message` 固定为「无权执行此操作」，`data={"permission":"<code>"}`（`<code>` 为该接口绑定的权限码）。安全规则拒绝同样返回 403（`CODE_FORBIDDEN`），`data` 为 `null`，完整清单（以 [07-admin-rbac](./07-admin-rbac.md) §6.5、§10 为准）：禁用自己、禁用最后一个有效超管、将最后一个有效超管移出 `super_admin` 组、修改自己的用户组、删除/停用系统组、停用仍有启用中管理员的自定义组、修改 `super_admin` 组权限、系统组权限清空、删除仍有管理员（含已禁用）的组；登录时密码校验通过后账号已禁用（「账号已禁用」）或所属用户组已停用（「用户组已停用」）同样返回 403、`data` 为 `null`（§7.1）。
+`require_permission` 拒绝时 `message` 固定为「无权执行此操作」，`data={"permission":"<code>"}`（`<code>` 为该接口绑定的权限码）。安全规则拒绝同样返回 403（`CODE_FORBIDDEN`），`data` 为 `null`，完整清单（以 [07-admin-rbac](./07-admin-rbac.md) §6.5、§10 为准）：禁用自己、禁用最后一个有效超管、将最后一个有效超管移出 `super_admin` 组、修改自己的用户组、删除/停用系统组、停用仍有启用中管理员的自定义组、修改 `super_admin` 组权限、把 `super_admin` 组的 `data_scope` 改为非 `all`、系统组权限清空、删除仍有管理员（含已禁用）的组；登录时密码校验通过后账号已禁用（「账号已禁用」）或所属用户组已停用（「用户组已停用」）同样返回 403、`data` 为 `null`（§7.1）。
 
 ### 4.4 数据范围（用户系统）
 
@@ -92,7 +92,7 @@
 | --- | --- |
 | 生效范围 | [13-user-data-scope](./13-user-data-scope.md) §6.3 所列的项目、模板、关键词、标题、内容、批次、素材与上传、项目覆盖路由、AI 任务与用量、平台的 `link_count`、链接、监控记录、告警、统计、操作日志按数据范围过滤；系统配置、模型目录、全局路由、平台规则、安全模块与运维动作只由权限码控制（13 §4.3） |
 | 归属 | 数据经 `project_id` 归属到项目负责人 `projects.owner_id`；`own` 范围只能看到、操作 `owner_id = 本人` 的项目及其下数据 |
-| `owner_id` 查询参数 | 受范围约束的列表、导出、统计接口与 `GET /admin/alerts/summary`、`GET /admin/monitoring/overview`、`GET /admin/ai/usage/summary` 均接受可选 `owner_id`：`all` 范围（总后台）据此只看该用户的数据（与该用户本人所见一致）；`own` 范围忽略此参数。各接口表不再逐一列出 |
+| `owner_id` 查询参数 | 受范围约束的列表、导出、统计接口与 `GET /admin/alerts/summary`、`GET /admin/monitoring/overview`、`GET /admin/ai/usage/summary`，以及 `POST /admin/monitoring/link-checks/run`、`POST /admin/monitoring/index-checks/run` 均接受可选 `owner_id`（`/admin/admin-operation-logs` 除外，[13-user-data-scope](./13-user-data-scope.md) §6.2）：`all` 范围（总后台）据此只看该用户的数据（与该用户本人所见一致）；`own` 范围忽略此参数。各接口表不再逐一列出 |
 | 不可见对象 | 一律按「不存在」处理：路径参数 → 404；请求体引用 → 与引用不存在的 ID 相同；列表筛选 → 空结果；数据范围从不返回 403（13 §8） |
 | 唯一冲突 | 全局唯一键命中不可见对象（`publish_links.url_hash`、`prompt_templates.code`）→ 409 `{"existing_id":null,"reason":"owned_by_other"}`（§5.3） |
 | 登录态 | `POST /admin/auth/login` 与 `GET /admin/auth/me` 返回 `data_scope`，前端据此决定是否显示用户视角切换器（13 §12） |
@@ -162,7 +162,7 @@
 | 内容编辑版本冲突（`PUT /admin/contents/{id}` 携带的 `current_version_id` 与服务端不一致，不写入） | `{"current_version_id":3302}`（服务端当前版本 ID） |
 | 回填链接 `url_hash` 重复 | `{"existing_id":3001}`（已存在链接 ID）；已存在的链接属于调用者不可见的项目时为 `{"existing_id":null,"reason":"owned_by_other"}`，`message`「该链接已由其他用户回填」 |
 | 新建模板 `code` 已被调用者不可见的模板使用 | `{"existing_id":null,"reason":"owned_by_other"}`，`message`「模板代码已被其他用户使用」 |
-| 项目 `name`/`slug` 在同一负责人下重复（创建或转移负责人） | `{"existing_id":12}` |
+| 项目 `name`/`slug` 在同一负责人下重复（创建、编辑改名/改 slug 或转移负责人） | `{"existing_id":12}` |
 | 手工新增关键词 `normalized_keyword` 重复 | `{"existing_id":301}`（已存在关键词 ID） |
 | 同内容已有同类非终态任务（`content_outline` / `content_seo` / `approved`、`published` 下的 `content_rewrite`） | `{"existing_id":5301}`（根任务 ID） |
 | 重试根任务已存在（同一旧根任务只能有一个重试根任务，`POST /admin/ai/tasks/{id}/retry`） | `{"existing_id":5210}`（已存在的重试根任务 ID） |
@@ -181,7 +181,7 @@
 - 动作接口一律 `POST /{resource}/{id}/{action}`（对象级）或 `POST /{resource}/{action}`（集合级），动作名 kebab-case；仅 RBAC 沿用 navigation 的 `PATCH /admins/{id}/status` 与 `PUT /admin-groups/{id}/permissions`。
 - 「`model?`」：请求级模型覆盖。须存在于 `ai_models` 且 `is_available=1` 且 `modalities` 包含该能力的模态（文本能力 `text`、图片 `image`、视频 `video`），否则 400 `data={"model":…}`；覆盖后候选链固定为该模型、不切换备选；原值记入根任务 `input.model` 与 `ai_tasks.model`（批次任务另记 `generation_batches.input.model`）。前端识别「使用了覆盖模型」统一看任务摘要的 `model_override`（`string|null`，取根任务 `input.model` 即 `ai_tasks.input_json.model`；文本与媒体相同，媒体不看 `params.model`），`GET /admin/generation-batches/{id}` 的 `tasks[]`、`GET /admin/contents/{id}/task`、`GET /admin/media/assets/{id}/task` 均返回该字段。异步任务的 `error_message` 一律不附 hint 后缀：覆盖模型失败靠 `model_override` 非空识别，上游拦截靠 `error_category=content_blocked` 识别；`hint` 只随同步 HTTP 响应返回（创建时覆盖模型熔断打开的 5031、同步调用上游接口的 5021；5021 在 `content_blocked` 与覆盖同时成立时取 `prompt_blocked`，§5.1）。
 - 列表接口说明列只写筛选参数，均支持 `page`/`page_size`；表中路径省略 `/api/v1` 前缀；「权限码」列为 `require_permission` 参数。
-- **数据范围**：路径前缀属于 `SCOPED_ROUTE_PREFIXES`（`/admin/projects`、`/admin/prompt-templates`、`/admin/keywords`、`/admin/titles`、`/admin/contents`、`/admin/generation-batches`、`/admin/media`、`/admin/uploads`、`/admin/ai/routes`、`/admin/ai/tasks`、`/admin/ai/usage`、`/admin/platforms`、`/admin/links`、`/admin/monitoring`、`/admin/alerts`、`/admin/stats`、`/admin/admin-operation-logs`）的路由都声明 `get_data_scope` 并按 §4.4 过滤，均接受可选查询参数 `owner_id`；下表只在行为有差异处单独说明（逐资源规则见 [13-user-data-scope](./13-user-data-scope.md) §6.3）。
+- **数据范围**：路径前缀属于 `SCOPED_ROUTE_PREFIXES`（`/admin/projects`、`/admin/prompt-templates`、`/admin/keywords`、`/admin/titles`、`/admin/contents`、`/admin/generation-batches`、`/admin/media`、`/admin/uploads`、`/admin/ai/routes`、`/admin/ai/tasks`、`/admin/ai/usage`、`/admin/platforms`、`/admin/links`、`/admin/monitoring`、`/admin/alerts`、`/admin/stats`、`/admin/admin-operation-logs`）的路由都声明 `get_data_scope` 并按 §4.4 过滤，均接受可选查询参数 `owner_id`（`/admin/admin-operation-logs` 除外，见 §6.5）；下表只在行为有差异处单独说明（逐资源规则见 [13-user-data-scope](./13-user-data-scope.md) §6.3）。
 - 异步任务的轮询入口固定三个：内容类 `GET /admin/contents/{id}/task`、关键词/标题 `GET /admin/generation-batches/{id}`、媒体 `GET /admin/media/assets/{id}/task`（§8）。
 
 ### 6.1 auth（`auth.py`，前缀 `/admin/auth`）
@@ -227,7 +227,7 @@
 
 | 方法 | 路径 | 权限码 | 说明 |
 | --- | --- | --- | --- |
-| GET | `/admin/admin-operation-logs` | `security.audit.view` | 分页；`admin_id`/`module`（按 `permission_code LIKE '{module}.%'`）/`action`/`target_type`/`start`/`end`；只读，无删除接口；`own` 范围只返回本人记录（忽略 `admin_id`） |
+| GET | `/admin/admin-operation-logs` | `security.audit.view` | 分页；`admin_id`/`module`（按 `permission_code LIKE '{module}.%'`）/`action`/`target_type`/`start`/`end`；只读，无删除接口；`own` 范围只返回本人记录（忽略 `admin_id`）；`owner_id` 查询参数对本接口不适用（被忽略，见 [13-user-data-scope](./13-user-data-scope.md) §6.2），总后台按用户筛选请用 `admin_id` |
 
 ### 6.6 settings（`settings.py`，前缀 `/admin/settings`）
 
@@ -244,10 +244,10 @@
 | 方法 | 路径 | 权限码 | 说明 |
 | --- | --- | --- | --- |
 | GET | `/admin/projects` | `content.projects.view` | 分页；`keyword`/`status`/`owner_id`（即 §4.4 的范围参数）；只含可见项目；每项附 `counts{keywords,contents,links}` 与负责人摘要 `owner{id,username,display_name}` |
-| GET | `/admin/projects/owner-options` | `content.projects.view` | 不分页；负责人候选：`all` 范围返回全部启用用户与仍负责项目的已禁用用户，`own` 范围只返回本人；每项 `{id,username,display_name,is_active,data_scope,project_count}`（[13-user-data-scope](./13-user-data-scope.md) §6.4）；供项目表单与顶栏用户视角切换器 |
+| GET | `/admin/projects/owner-options` | `content.projects.view` | 不分页；负责人候选：`all` 范围返回全部启用用户与仍负责项目的已禁用用户，`own` 范围只返回本人；每项 `{id,username,display_name,is_active,data_scope,project_count}`（[13-user-data-scope](./13-user-data-scope.md) §6.4）；供项目表单与顶栏用户视角切换器；按调用者自身的 `data_scope` 判定，忽略 `owner_id` 查询参数（总后台处于用户视角时仍返回全部候选，13 §6.4） |
 | POST | `/admin/projects` | `content.projects.create` | 创建（§7.3）；`owner_id` 可选：`own` 范围只能省略或为本人（否则 400 `type=owner_forbidden`），`all` 范围缺省本人、指定时须为启用用户（否则 400 `type=owner_unavailable`）；`name`/`slug` 在同一负责人下唯一（重复 409 `existing_id`）；提交后清 `cache:stats:*` |
 | GET | `/admin/projects/{id}` | `content.projects.view` | 详情 + `routes[]`（项目级 `capability_routes` 覆盖行） |
-| PUT | `/admin/projects/{id}` | `content.projects.update` | 编辑；`default_templates` 键 ∈ `prompt_kind`、值须为该 kind 的可见 `published` 模板 ID（否则 400）；`default_platform_ids` 须为 `is_active=1` 平台；`owner_id` 变化即**转移负责人**：仅 `all` 范围（`own` 范围改为他人 → 400 `owner_forbidden`），目标须为启用用户（400 `owner_unavailable`），目标用户下 `name`/`slug` 冲突 409；项目及其下全部数据、统计、告警随之转移，提交后清 `cache:stats:*`，审计摘要「转移项目 {name} 负责人：{旧} → {新}」 |
+| PUT | `/admin/projects/{id}` | `content.projects.update` | 编辑；`default_templates` 键 ∈ `prompt_kind`、值须为该 kind 的可见 `published` 模板 ID 且模板 `project_id ∈ {0, 该项目}`（否则 400，`type` 见 §7.3）；`default_platform_ids` 须为 `is_active=1` 平台；`name`/`slug` 在（新）负责人下唯一（重复 409 `existing_id`）；`owner_id` 变化即**转移负责人**：仅 `all` 范围（`own` 范围改为他人 → 400 `owner_forbidden`），目标须为启用用户（400 `owner_unavailable`），目标用户下 `name`/`slug` 冲突 409；项目及其下全部数据、统计、告警随之转移，提交后清 `cache:stats:*`，审计摘要「转移项目 {name} 负责人：{旧} → {新}」 |
 | PUT | `/admin/projects/{id}/routes` | `content.projects.update` | `{routes:[{capability,primary_model,fallback_models[],params?,protocol?}]}` 对 `capability_routes(project_id=id)` upsert：只写 `protocol/primary_model/fallback_models/params`，既有行其余列保留，新行 `timeout_seconds/max_attempts/is_enabled` 从同能力全局行复制；未出现的能力删除覆盖行，空数组删除全部；主/备模型须存在于 `ai_models`、模态匹配且 `is_available=1`（运营侧不允许保存不可用模型，与 `/admin/ai/routes` 不同），否则 400（`loc` 如 `["body","routes",0,"primary_model"]`，`type=invalid_model` / `model_unavailable`）；保存后清 `cache:routes:*` |
 | POST | `/admin/projects/{id}/archive` | `content.projects.status` | `active → archived` |
 | POST | `/admin/projects/{id}/unarchive` | `content.projects.status` | `archived → active` |
@@ -268,7 +268,7 @@
 | POST | `/admin/prompt-templates/{id}/archive` | `content.prompt_templates.publish` | `published → archived`；同 code 无其它 `published` 且（系统模板或被任一项目 `default_templates` 引用）→ 409 `reason=last_published` |
 | POST | `/admin/prompt-templates/{id}/duplicate` | `content.prompt_templates.create` | `{code,name}` 复制为新 code 草稿 |
 | POST | `/admin/prompt-templates/{id}/preview` | `content.prompt_templates.view` | `{variables}` → `{system_prompt,user_prompt}` 渲染结果，不调用模型、不记审计；必填变量缺失 4221 |
-| GET | `/admin/prompt-templates/{id}/versions` | `content.prompt_templates.view` | 不分页；同 code 全部版本 |
+| GET | `/admin/prompt-templates/{id}/versions` | `content.prompt_templates.view` | 不分页；同 code 的全部可见版本（全局草稿只对创建人与 `all` 范围可见，[13-user-data-scope](./13-user-data-scope.md) §7.3） |
 | DELETE | `/admin/prompt-templates/{id}` | `content.prompt_templates.delete` | 仅 `draft` 且非系统模板 |
 
 ### 6.9 keywords（`keywords.py`，前缀 `/admin/keywords`）
@@ -388,6 +388,7 @@
 | POST | `/admin/ai/tasks/{id}/cancel` | `ai.tasks.cancel` | 根任务 `queued`/`polling → cancelled`（`polling` 不调用上游取消）；媒体根任务同事务把资产置 `failed(cancelled)`；内容任务恢复 `prev_status`；同步执行的根任务（`seo_check`/`geo_check`/`route_probe`/`image_prompt`）409 |
 | GET | `/admin/ai/usage/logs` | `ai.usage.view` | 分页 `ai_usage_logs`；`model_name`/`log_type`/`matched`（`true`：`ai_task_id` 非空）/`request_id`/`start`/`end`；`own` 范围（或带 `owner_id`）只返回匹配到可见尝试行的条目，未匹配条目只对总后台可见 |
 | POST | `/admin/ai/usage/reconcile` | `ai.usage.reconcile` | 立即拉取 `/api/log/token` 对账（锁 `lock:worker:reconcile`，占用中 409；Mock 模式同样执行）→ `{pulled,new,matched,unmatched,window_overflow,request_ids[]}` |
+| GET | `/admin/ai/usage/last-pull` | `ai.usage.view` | 最近一次对账拉取摘要（读 Redis `ai:usage:last_pull`，键不存在时 `data=null`），供 `ai/Usage.vue` 顶部展示：`all` 范围返回 `{pulled_at,pulled,new,matched,unmatched,window_overflow,request_ids[]}`；`own` 范围（或带 `owner_id`）只返回 `{pulled_at,window_overflow}`，不返回计数与 `request_ids[]`（[13-user-data-scope](./13-user-data-scope.md) §4.3） |
 | GET | `/admin/ai/usage/summary` | `ai.usage.view` | `?group_by=model\|capability\|project\|day&start&end`（`start`/`end` 为日期 `YYYY-MM-DD`，闭区间，按 `stats_config.timezone` 切日，跨度 ≤ 366 天，省略时为最近 30 天）→ `[{key,calls,prompt_tokens,completion_tokens,quota_estimated,quota_actual,cost_cny,reconciled_rate}]`（按终态尝试行，`trigger_type != health_probe`；`reconciled_rate = reconciled_at 非空的尝试行数 / calls`）；只汇总可见尝试行（`group_by=project` 只列可见项目） |
 
 ### 6.16 platforms（`platforms.py`，前缀 `/admin/platforms`）
@@ -409,7 +410,7 @@
 | GET | `/admin/links` | `publish.links.view` | 分页；`project_id`/`content_id`/`platform_id`/`alive_status`/`seo_indexed_any`/`geo_cited_any`/`is_monitoring`/`keyword`（URL/标题模糊）/`published_start`/`published_end` |
 | POST | `/admin/links` | `publish.links.create` | 回填 `{content_id,platform_id?,url,publish_account?,published_at?,note?}`（§7.10）；URL 预校验失败 400；`published_at` 缺省取当前时间，不得晚于当前时间 + 5 分钟、不得早于当前时间 − 3650 天（否则 400，`loc=["body","published_at"]`），允许早于内容 `created_at`（登记历史文章、补录）；`url_hash` 重复 409 `existing_id`（已有链接对调用者不可见时 `existing_id=null`、`reason=owned_by_other`）；内容须可见且 `approved`/`published`（否则 409 `current_status`）；平台缺省自动识别；入队基线检测；返回 `{link,queued}` |
 | GET | `/admin/links/export` | `publish.links.view` | CSV（同列表筛选；含按引擎收录状态与最近检测） |
-| POST | `/admin/links/batch` | `publish.links.create` | `{items:[{content_id,platform_id?,url,publish_account?,published_at?,note?}]}` 批量回填（`items` ≤ 100 条，超出 400；逐条按单条规则校验（含 `published_at` 范围），逐条独立事务，整体 200）→ `{created,failed,results[{index,ok,link_id,queued,code,message}]}` |
+| POST | `/admin/links/batch` | `publish.links.create` | `{items:[{content_id,platform_id?,url,publish_account?,published_at?,note?}]}` 批量回填（`items` ≤ 100 条，超出 400；逐条按单条规则校验（含 `published_at` 范围），逐条独立事务，整体 200）→ `{created,failed,results[{index,ok,link_id,queued,code,message,reason?}]}`；`url_hash` 命中调用者不可见的链接时该条 `ok=false, code=409, link_id=null, reason="owned_by_other"`，`message`「该链接已由其他用户回填」（同单条规则，不返回对方链接 ID） |
 | GET | `/admin/links/{id}` | `publish.links.view` | 详情（含 `platform`、`content` 摘要、基线、按引擎收录状态与 `checked_at`、`last_check`） |
 | PUT | `/admin/links/{id}` | `publish.links.update` | `{platform_id?,publish_account?,published_at?,note?}`；`published_at` 范围校验同 `POST /admin/links`（允许早于内容 `created_at`）；URL 不可改（改 URL 需删后重填）；改 `published_at` 重算 `next_index_check_at` 与 `contents.first_published_at` |
 | DELETE | `/admin/links/{id}` | `publish.links.delete` | 删除（级联 `link_checks`/`index_checks`）；同事务更新 `contents.link_count`、重算 `first_published_at`，`published` 且链接归零回到 `approved` |
@@ -592,7 +593,7 @@ Authorization: Bearer <admin-jwt>
 }
 ```
 
-- `default_templates` 的键 ∈ `prompt_kind`（`keyword`/`title`/`outline`/`content`/`section`/`rewrite`/`expand`/`shorten`/`restyle`/`seo_meta`/`faq`/`image_prompt`/`geo_query`/`seo_query`），值须为该 kind 的 `published` 模板 ID，否则 400 `data=[{"loc":["body","default_templates","title"],"msg":"模板不存在或未发布","type":"value_error","input":2}]`；省略的 kind 按系统模板回退。
+- `default_templates` 的键 ∈ `prompt_kind`（`keyword`/`title`/`outline`/`content`/`section`/`rewrite`/`expand`/`shorten`/`restyle`/`seo_meta`/`faq`/`image_prompt`/`geo_query`/`seo_query`），值须为该 kind 的可见 `published` 模板 ID，且模板 `project_id ∈ {0, 该项目}`（新建时项目还没有专属模板，即只能引用全局模板；`PUT /admin/projects/{id}` 同此规则，[13-user-data-scope](./13-user-data-scope.md) §7.1），否则 400，`type` 同 [09-generation-pipeline](./09-generation-pipeline.md) §4.2：`not_published`（模板不存在、不可见或未发布，三者响应相同）/`kind_mismatch`/`project_mismatch`，如 `data=[{"loc":["body","default_templates","title"],"msg":"模板不存在或未发布","type":"not_published","input":2}]`；`PUT` 引用其他项目的专属模板时为 `[{"loc":["body","default_templates","title"],"msg":"模板不属于该项目","type":"project_mismatch","input":9}]`；省略的 kind 按系统模板回退。
 - `owner_id` 为项目负责人（数据归属用户）：省略时为当前用户；`own` 范围只能是本人（否则 400 `[{"loc":["body","owner_id"],"msg":"只能创建或保留自己负责的项目","type":"owner_forbidden","input":7}]`），`all` 范围可指定任一启用用户（否则 `type="owner_unavailable"`）；候选取自 `GET /admin/projects/owner-options`。`name`/`slug` 在同一负责人下唯一，重复 409 `existing_id`。
 - `routes[]` 为项目级模型覆盖（`capability_routes(project_id=id)`），创建时为空；用 `PUT /admin/projects/1/routes` 维护：
 
@@ -912,7 +913,7 @@ GET /api/v1/admin/media/assets/7001
 - 资产 `status` 流转 `pending → submitted → generating → downloading → ready`（根任务 `succeeded` 后仍需转存，前端以资产 `ready` 为完成）；`failed`/`expired` 可 `POST /admin/media/assets/7001/retry`（返回 `{asset,task_id,resumed}`，`resumed=true` 表示复用了旧上游任务，不重复计费），`failed(transfer_failed)` 可 `POST …/transfer`。
 - `url` 为转存后的稳定地址（本地模式 `PUBLIC_BASE_URL + /media/{storage_key}`，`oss` 模式为 `OSS_PUBLIC_BASE_URL` 下地址）；`upstream_url` 仅供审计，会过期。
 - 绑定到文章：`usage_type=cover` 且带 `content_id` 的图片资产（`kind=image`）在 `ready` 后自动写 `contents.cover_asset_id`；独立素材用 `POST /admin/contents/{id}/assets/{asset_id}/attach` `{ "usage_type": "inline", "sort": 1 }`（`cover` 只接受 `kind=image` 且 `status=ready` 的素材）。
-- `references`（仅详情，实时计算）：`cover_of` = 以本素材为封面的内容 ID（`contents.cover_asset_id`），`bound_content_id` = 本行 `content_id`，`referenced_by_asset_ids[{id,status}]` = 在 `reference_asset_ids` 中引用本素材的其它资产，`count` 为三者合计；删除确认框据此提示，规则见 [10-media-generation](./10-media-generation.md) §6.3。
+- `references`（仅详情，实时计算）：`cover_of` = 以本素材为封面的内容 ID（`contents.cover_asset_id`），`bound_content_id` = 本行 `content_id`，`referenced_by_asset_ids[{id,status}]` = 在 `reference_asset_ids` 中引用本素材、且调用者可见的其它资产，`count` 为三者合计；删除确认框据此提示，规则见 [10-media-generation](./10-media-generation.md) §6.3。数据范围下详情的 `reference_asset_ids`、`referenced_by_asset_ids` 与 `count` 只计调用者可见的素材（[13-user-data-scope](./13-user-data-scope.md) §6.1）；删除保护 409 `in_use` 仍按全部引用判断，不受数据范围约束（13 §7.1）。
 
 ### 7.9 创建视频任务与查询
 
@@ -1043,7 +1044,7 @@ Authorization: Bearer <admin-jwt>
 - `url_hash` 重复：`{ "code": 409, "message": "链接已存在", "data": { "existing_id": 3001 } }`；已存在的链接属于调用者不可见的项目（其他用户回填）时：`{ "code": 409, "message": "该链接已由其他用户回填", "data": { "existing_id": null, "reason": "owned_by_other" } }`。
 - `content_id` 须为调用者可见的内容，否则与内容不存在时相同（404）。
 - `queued=true` 表示基线检测已入 `queue:link_checks`（`check_type=baseline`），`next_check_at` 已推后 1 小时作为兜底；`next_index_check_at` 按 `index_check.schedule_days` 的首个到期轮次计算。
-- 批量：`POST /admin/links/batch` `{ "items": [ {…}, {…} ] }` → `{ "created": 1, "failed": 1, "results": [ { "index": 0, "ok": true, "link_id": 3001, "queued": true, "code": 0, "message": "ok" }, { "index": 1, "ok": false, "link_id": 3001, "queued": false, "code": 409, "message": "链接已存在" } ] }`（逐条独立事务，整体返回 200）。
+- 批量：`POST /admin/links/batch` `{ "items": [ {…}, {…} ] }` → `{ "created": 1, "failed": 1, "results": [ { "index": 0, "ok": true, "link_id": 3001, "queued": true, "code": 0, "message": "ok" }, { "index": 1, "ok": false, "link_id": 3001, "queued": false, "code": 409, "message": "链接已存在" } ] }`（逐条独立事务，整体返回 200）。409 条目的 `link_id` 为已存在链接 ID；已存在链接对调用者不可见时该条为 `{ "ok": false, "link_id": null, "queued": false, "code": 409, "message": "该链接已由其他用户回填", "reason": "owned_by_other" }`（同单条规则，不返回对象 ID，[13-user-data-scope](./13-user-data-scope.md) §8）；`reason` 仅在此情形出现。
 
 ### 7.11 手动触发检测
 
@@ -1312,11 +1313,11 @@ GET /api/v1/admin/stats/overview?project_id=0&range=7d
 }
 ```
 
-- `meta`：`start_date`/`end_date` 为 `range` 覆盖的统计日（按 `stats_config.timezone` 切日；`today` 为今日，`7d`/`30d` 为含今日的最近 7/30 天）；`today_source` ∈ `daily_stats`/`realtime`/`none`——今日流量类数值优先取 `daily_stats(stat_date=今日)` 行，无行时取 `stats:rt:{date}:{project_id}`，二者不叠加，Redis 也不可用时为 `none`；`snapshot_date` 为快照类指标的实际取值日（末日无行时取最近一行）；`computed_at` = range 内 `total` 行 `computed_at` 的最大值（无行时为 `null`）；`cached=true` 表示命中 `cache:stats:overview:{scope_key}:{project_id}:{range}`；`scope`/`owner_id` 标明统计范围（`all` 为全平台，`owner` 为某一用户负责的项目，[13-user-data-scope](./13-user-data-scope.md) §10）；`warnings[]` 取值 `realtime_unavailable`/`cache_unavailable`/`p50_sampled`。
+- `meta`：`start_date`/`end_date` 为 `range` 覆盖的统计日（按 `stats_config.timezone` 切日；`today` 为今日，`7d`/`30d` 为含今日的最近 7/30 天）；`today_source` ∈ `daily_stats`/`realtime`/`none`——今日流量类数值优先取 `daily_stats(stat_date=今日)` 行，无行时取 `stats:rt:{date}:{project_id}`，二者不叠加，Redis 也不可用时为 `none`（「无行」以今日 `project_id=0` 的 `total` 行是否存在为准，各范围一致；`owner` 范围下存在时对 P 内今日项目行求和、无行计 0，不存在时对 P 内各项目的 `stats:rt:{date}:{pid}` 按字段求和，见 [13-user-data-scope](./13-user-data-scope.md) §10.2）；`snapshot_date` 为快照类指标的实际取值日（末日无行时取最近一行）；`computed_at` = range 内 `project_id=0` `total` 行 `computed_at` 的最大值（各范围一致；无行时为 `null`）；`cached=true` 表示命中 `cache:stats:overview:{scope_key}:{project_id}:{range}`；`scope`/`owner_id` 标明统计范围（`all` 为全平台，`owner` 为某一用户负责的项目，[13-user-data-scope](./13-user-data-scope.md) §10）；`warnings[]` 取值 `realtime_unavailable`/`cache_unavailable`/`p50_sampled`。
 - `kpis` 只含标量指标（字段集合以 12 §9.1 为准）：当前值指标（`*_total`、`links_alive`、`links_deleted`、`link_alive_rate`/`link_deleted_rate`、`seo_index_rate`/`geo_cite_rate`、`time_to_index_hours_*`）按 `project_id` 过滤、不受 `range` 影响，流量类指标为 `range` 内求和，比率类（含任务级 `task_success_rate` = `Σ tasks_succeeded / Σ (tasks_succeeded + tasks_failed)`）由 `range` 内分子、分母分别求和后相除；总览的 `links_deleted` 是当前已删除链接数，趋势/分解中的同名指标是事件计数。
 - 收录耗时口径（以 [12-dashboard-reports](./12-dashboard-reports.md) 为准）：补录延迟 `publish_links.created_at − published_at` > 72 小时（常量 `stats_service.MAX_BACKFILL_DELAY_HOURS = 72`）的链接视为历史补录，首次收录时间不可观测，不计入 `time_to_index_hours_avg`、`time_to_index_hours_p50`、`daily_stats.index_hours_sum`/`index_hours_links` 与榜单 `fastest_indexed`，仍计入收录率与新收录数 `seo_newly_indexed` 等其它指标。趋势 `time_to_index_hours_avg = Σ index_hours_sum / Σ index_hours_links`（`index_hours_links` 为当日计入 `index_hours_sum` 的新收录链接数，与 `index_hours_sum` 同维度填写；分母为 0 时为 `null`）；`seo_newly_indexed` 仍包含历史补录链接，只用于新收录数量，不作耗时分母。
 - `compare` 只含流量类与比率类指标，每项为 `{previous, delta, delta_rate}`：`delta = current − previous`，`delta_rate = delta / previous`（`previous` 为 0 或 `null` 时为 `null`）；`today` 对比昨天，`7d`/`30d` 对比前 7/30 天。
-- `breakdowns` 放分布类数据：`*_by_status` 为当前状态分布；`alerts_open` 统计 `status ∈ open/acknowledged` 并按 `severity` 分组（= `GET /admin/alerts/summary` 的 `open + acknowledged`）；`cost_by_capability[]` / `cost_by_model[]` 分别取 `daily_stats` 的 `capability` / `model` 行，`range` 内求和后按 `cost_cny` 降序各取最多 8 行，每行列为 `capability`（或 `model`）、`ai_calls`、`ai_success_rate`、`tokens_total`、`quota_estimated`、`quota_actual`、`cost_cny`、`share`（费用占比），`cost_by_capability` 另带任务级 `task_success_rate`、`task_avg_duration_ms`（`image`/`video` 行供「媒体成功率」卡片副值使用）；`seo_index_rate_by_engine`/`geo_cite_rate_by_engine` 为存量口径 `{rate,hit,total}`（`total` = `snapshot_date` 当日 `total` 行的 `links_total_snapshot`；当日无该引擎行时 `rate`/`hit` 为 `null`）。
+- `breakdowns` 放分布类数据：`*_by_status` 为当前状态分布；`alerts_open` 统计 `status ∈ open/acknowledged` 并按 `severity` 分组（= `GET /admin/alerts/summary` 的 `open + acknowledged`）；`cost_by_capability[]` / `cost_by_model[]` 分别取 `daily_stats` 的 `capability` / `model` 行，`range` 内求和后按 `cost_cny` 降序各取最多 8 行，每行列为 `capability`（或 `model`）、`ai_calls`、`ai_success_rate`、`tokens_total`、`quota_estimated`、`quota_actual`、`cost_cny`、`share`（费用占比），`cost_by_capability` 另带任务级 `task_success_rate`、`task_avg_duration_ms`（`image`/`video` 行供「媒体成功率」卡片副值使用）；`seo_index_rate_by_engine`/`geo_cite_rate_by_engine` 为存量口径 `{rate,hit,total}`（`total` = `snapshot_date` 当日 `total` 行的 `links_total_snapshot`；当日无该引擎行时 `rate`/`hit` 为 `null`。`owner` 范围下引擎集合取 `project_id=0` 的引擎行，`hit`/`total` 为 P 内各项目之和，无行计 0，`total=0` 时 `rate=null`，见 [13-user-data-scope](./13-user-data-scope.md) §10.2）。
 - `series` 为列式的四条轻量序列（按日，供 KPI 迷你趋势），天数 = range 天数且最少 7 天（`today` 返回最近 7 天），缺行日期填 0。
 - 比率以 0~1 小数返回（保留 4 位），分母为 0 时为 `null`；指标公式与两种收录率口径（`seo_index_rate` 检测口径、`seo_index_rate_by_engine` 存量口径，二者不可互相比较）以 [12-dashboard-reports](./12-dashboard-reports.md) 为准。
 

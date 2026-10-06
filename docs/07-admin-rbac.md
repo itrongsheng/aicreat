@@ -339,13 +339,13 @@ DEFAULT_GROUP_PERMISSIONS = {
 | `reviewer` | 控制台；内容生产各页查看；审核、编辑、导出内容；媒体/发布/监控各页查看；报表查看 | 任何生成、回填、检测触发、告警处理、导出报表；AI 网关各页（无 `ai.*`）；参考素材上传；系统与安全模块 |
 | `read_only` | 除 `security.*` 与 `system.settings.view` 外的全部 `*.view`（含 `system.upload.view`，但无 `create`）；`stats.reports.export`；列表 CSV 导出（沿用 `view`） | 任何写操作、内容全文导出、系统配置、安全模块 |
 
-上表只描述**功能权限**；能看到哪些数据由所属组的 `data_scope` 决定（§5.1）：`operator` 默认 `own`，上表中的一切操作都只作用于本人负责的项目及其下数据；`super_admin`/`reviewer`/`read_only` 默认 `all`，作用于全部用户的数据。安全模块与全局配置（`security.*`、`system.settings.*`、`ai.models.sync`、`ai.routes` 的写与探测、`ai.usage.reconcile`、`publish.platforms` 的写与测试、`stats.reports.recompute`）不受数据范围约束（[13-user-data-scope](./13-user-data-scope.md) §4.3），只应授予 `all` 范围的组。
+上表只描述**功能权限**；能看到哪些数据由所属组的 `data_scope` 决定（§5.1）：`operator` 默认 `own`，项目及其下数据（关键词、标题、内容、批次、素材、链接、检测、任务、告警、统计等）只作用于本人负责的项目；全局已发布 / 已归档模板、全局路由（`project_id = 0`）、发布平台、模型目录等平台级数据对其只读可见，其创建的全局模板草稿只对本人与总后台可见（[13-user-data-scope](./13-user-data-scope.md) §4.2、§4.3、§7.3）；`super_admin`/`reviewer`/`read_only` 默认 `all`，作用于全部用户的数据。安全模块与全局配置（`security.*`、`system.settings.*`、`ai.models.sync`、全局路由（`project_id = 0`）的写入、`ai.routes.test` / `ai.routes.reset_breaker`、`ai.usage.reconcile`、`publish.platforms` 的写与测试、`stats.reports.recompute`）不受数据范围约束（13 §4.3）；但项目覆盖路由（`project_id > 0`）的新建 / 编辑 / 删除、测试与重置熔断仍要求项目属于 P（13 §6.3）。这些码只应授予 `all` 范围的组。
 
 ### 5.3 自定义用户组
 
 - 由 `security.groups.create` 创建，`code=custom_{uuid4().hex[:12]}`、`is_system=0`、`data_scope` 缺省 `own`（创建时可传 `all`）；初始无任何权限，需随后 `PUT /admin/admin-groups/{id}/permissions` 分配。
 - 自定义组可停用（须无启用中的管理员）、可删除（须无任何管理员）。
-- 推荐的组合示例：「媒体设计」= `dashboard.view` + `media.*` + `system.upload.*` + `content.contents.view`；「SEO 专员」= `dashboard.view` + `publish.*` + `monitoring.*` + `stats.reports.view/export`。二者服务于全部用户时设为 `all`，只服务本人项目时保持 `own`。
+- 推荐的组合示例：「媒体设计」= `dashboard.view` + `media.*` + `system.upload.*` + `content.contents.view`；「SEO 专员」= `dashboard.view` + `publish.links.*` + `publish.platforms.view` + `monitoring.*` + `stats.reports.view/export`。二者服务于全部用户时设为 `all`，只服务本人项目时保持 `own`；若需维护发布平台（`publish.platforms.create/update/delete/test`），该组只应设为 `all`（[13-user-data-scope](./13-user-data-scope.md) §4.3）。
 
 ## 6. 后端接口设计
 
@@ -498,7 +498,7 @@ Content-Type: application/json
 {"code": 0, "message": "ok", "data": {"items": [
   {"id": 1203, "admin": {"id": 1, "username": "admin", "display_name": "超级管理员"}, "group_name": "超级管理员",
    "permission_code": "security.admins.status", "action": "update_status", "target_type": "admin", "target_id": "5",
-   "summary": "禁用管理员 operator01", "request_id": "6f1c0d8e4b2a4f0e9c1d2e3f4a5b6c7d", "ip": "203.0.113.0", "created_at": "2026-10-06T08:12:30Z"}
+   "summary": "禁用用户 operator01", "request_id": "6f1c0d8e4b2a4f0e9c1d2e3f4a5b6c7d", "ip": "203.0.113.0", "created_at": "2026-10-06T08:12:30Z"}
 ], "total": 1, "page": 1, "page_size": 20}}
 ```
 
@@ -716,7 +716,7 @@ sequenceDiagram
 | `/admin/settings` | `setting`（`target_id` = `{key}`） | `/admin/admins` | `admin` |
 | `/admin/admin-groups` | `admin_group` | `/admin/auth` | `admin`（`target_id` = 当前管理员） |
 
-`summary` 默认为 `f"{ACTION_LABELS[action]} {target_type}" + (f" #{target_id}" if target_id else "")`（`ACTION_LABELS`：`create` 新增、`update` 更新、`update_status` 变更状态、`delete` 删除、`execute` 执行、`reset_password` 重置密码）；处理函数可在返回前设置 `request.state.audit_summary`（≤ 255 字符的中文摘要，如「禁用管理员 operator01」）与 `request.state.audit_target_id` 覆盖默认值。中间件实现骨架：
+`summary` 默认为 `f"{ACTION_LABELS[action]} {target_type}" + (f" #{target_id}" if target_id else "")`（`ACTION_LABELS`：`create` 新增、`update` 更新、`update_status` 变更状态、`delete` 删除、`execute` 执行、`reset_password` 重置密码）；处理函数可在返回前设置 `request.state.audit_summary`（≤ 255 字符的中文摘要，如「禁用用户 operator01」）与 `request.state.audit_target_id` 覆盖默认值。中间件实现骨架：
 
 ```python
 @app.middleware("http")
@@ -754,7 +754,7 @@ def write_audit(db: Session, request: Request, admin: Admin, permission_code: st
     request.state.audit_written = True
 ```
 
-`mask_ip`：IPv4 末段置 0（`203.0.113.42` → `203.0.113.0`），IPv6 保留前 4 组后接 `::`；空值写 NULL。`summary` 与所有字段都不得包含密码、密钥、令牌（重置密码的摘要只写「重置管理员 xxx 的密码」）。
+`mask_ip`：IPv4 末段置 0（`203.0.113.42` → `203.0.113.0`），IPv6 保留前 4 组后接 `::`；空值写 NULL。`summary` 与所有字段都不得包含密码、密钥、令牌（重置密码的摘要只写「重置用户 xxx 的密码」）。
 
 ### 7.7 请求追踪 ID
 
@@ -795,7 +795,7 @@ def write_audit(db: Session, request: Request, admin: Admin, permission_code: st
 | --- | --- | --- |
 | 新增用户 | `security.admins.create` | 弹窗：账号、显示名称、所属用户组（仅 `is_active` 组，每项显示其数据范围）、初始密码、状态；前端按 §6.2 规则预校验 |
 | 编辑 | `security.admins.update` | 弹窗只含显示名称、所属用户组；不回显密码；当前登录管理员自己这一行的用户组下拉禁用；把最后一个有效超管移出 `super_admin` 组由后端 403 拒绝，前端直接展示 `message` |
-| 启用/禁用 | `security.admins.status` | 二次确认；自己这一行禁用按钮置灰；禁用成功后提示「该管理员的登录状态已失效」 |
+| 启用/禁用 | `security.admins.status` | 二次确认；自己这一行禁用按钮置灰；禁用成功后提示「该用户的登录状态已失效」 |
 | 重置密码 | `security.admins.reset_password` | 单独弹窗：新密码 + 确认；成功提示「密码已重置，旧登录状态已失效」；密码不再展示 |
 
 列表接口 403 时由全局拦截器提示；页面自身不做权限判断，依赖路由守卫与 `v-permission`。
@@ -805,7 +805,7 @@ def write_audit(db: Session, request: Request, admin: Admin, permission_code: st
 左右布局：左侧用户组列表（名称、系统组标签、`admin_count`、状态），右侧为选中组的详情：
 
 - 基本信息表单：名称、说明、状态、数据范围（`el-radio-group`：「全部数据（总后台）」/「仅本人负责的项目」，说明文字「仅本人：只能看到自己负责的项目及其下数据与统计」）；系统组的「状态」开关禁用，`super_admin` 组的数据范围禁用；保存 → `PUT /admin/admin-groups/{id}`（`security.groups.update`）。左侧列表每组显示数据范围标签。
-- 数据范围为「仅本人」的组勾选 `security.*`、`system.settings.*` 等总后台职能权限时，权限树上方显示提示「这些权限不受数据范围限制」（[13-user-data-scope](./13-user-data-scope.md) §4.3）。
+- 数据范围为「仅本人」的组勾选 `security.*`、`system.settings.*` 等总后台职能权限时，权限树上方显示提示「这些权限属于总后台职能，不受数据范围限制」（[13-user-data-scope](./13-user-data-scope.md) §4.3、§12.3）。
 - 权限树：数据来自 `GET /admin/admin-permissions/tree`（页面内缓存一次），用 `el-tree` 渲染「模块 → 页面（menu）→ 操作（action）」三层，`node-key="code"`、`show-checkbox`、`check-strictly=true` 并自定义联动：勾选 action 自动勾选其父 `view`；取消 `view` 自动取消其全部 action；模块节点提供「全选 / 取消全选 / 展开 / 收起」。
 - 保存 → `PUT /admin/admin-groups/{id}/permissions`（`security.groups.assign`）；提交前在前端按 §4.3 补齐依赖并高亮「自动勾选」的节点；以响应 `permission_codes` 回显最终结果。
 - `super_admin` 组：权限树全选且只读，保存按钮隐藏；其它系统组可改权限，但不能删除、停用。
@@ -813,12 +813,12 @@ def write_audit(db: Session, request: Request, admin: Admin, permission_code: st
 
 ### 8.5 操作日志 `admin-operation-logs/Index.vue`
 
-列表字段：操作时间、管理员（显示名/账号）、用户组、模块（由 `permission_code` 前缀映射中文）、权限码、动作、目标（`target_type #target_id`）、摘要、来源 IP、`request_id`（可复制）。筛选：管理员（有 `security.admins.view` 时为下拉，否则为 ID 输入框）、模块（`MODULE_NAMES` 九个模块 + `auth`）、动作（8 个枚举值）、目标类型、时间范围（本地时间选择，转换为 ISO 8601 UTC 的 `start`/`end`）。只读列表，无导出、无删除。
+列表字段：操作时间、用户（显示名/账号）、用户组、模块（由 `permission_code` 前缀映射中文）、权限码、动作、目标（`target_type #target_id`）、摘要、来源 IP、`request_id`（可复制）。筛选：用户（有 `security.admins.view` 时为下拉，否则为 ID 输入框）、模块（`MODULE_NAMES` 九个模块 + `auth`）、动作（8 个枚举值）、目标类型、时间范围（本地时间选择，转换为 ISO 8601 UTC 的 `start`/`end`）。只读列表，无导出、无删除。
 
 ### 8.6 修改密码、403 与首页落点
 
 - 顶栏用户下拉「修改密码」弹窗：原密码、新密码、确认；`POST /admin/auth/change-password` 成功后调用 `auth.logout()`（不再请求 logout 接口，因为令牌已失效）并跳转 `/login`，提示「密码已修改，请重新登录」。
-- `Forbidden.vue`：展示 403、提示「当前管理员用户组未获得此页面的访问权限」，按钮「返回上一页」与「回到首页」（跳转 `resolveHomePath()`）。
+- `Forbidden.vue`：展示 403、提示「当前用户所属用户组未获得此页面的访问权限」，按钮「返回上一页」与「回到首页」（跳转 `resolveHomePath()`）。
 - `resolveHomePath()`（`router/index.ts` 导出）：按 Layout 菜单配置顺序取第一个有权限的菜单路径；没有任何菜单权限时为 `/403`。`/` 的重定向目标使用该值：四个系统组都拥有 `dashboard.view`，因此对它们恒为 `/dashboard`（与 [02-project-structure](./02-project-structure.md) §3.3「`/` 重定向至 `/dashboard`」一致），仅未授予 `dashboard.view` 的自定义组落到其第一个可见菜单。
 
 ## 9. 前端权限控制
@@ -829,6 +829,7 @@ def write_audit(db: Session, request: Request, admin: Admin, permission_code: st
 import { defineStore } from "pinia";
 import type { AdminProfile } from "@aicreat/shared";
 import { authApi } from "@/api/auth";
+import { useProjectStore } from "@/store/project";
 
 function readProfile(): AdminProfile | null {
   try { return JSON.parse(localStorage.getItem("admin_profile") || "null"); } catch { return null; }   // 本地缓存损坏时按未命中处理
@@ -852,6 +853,7 @@ export const useAuthStore = defineStore("adminAuth", {
     setAdmin(admin: AdminProfile) { this.admin = admin; this.hydrated = true; localStorage.setItem("admin_profile", JSON.stringify(admin)); },
     async login(body: { username: string; password: string }) {
       const data = await authApi.login(body);
+      useProjectStore().resetScope();                   // 清空上一个账号的用户视角与当前项目（13 §12.2）
       this.token = data.token; localStorage.setItem("admin_token", data.token); this.setAdmin(data.admin);
     },
     async fetchMe() {
@@ -864,11 +866,14 @@ export const useAuthStore = defineStore("adminAuth", {
     logout(callApi = true) {
       if (callApi && this.token) authApi.logout().catch(() => undefined);
       this.token = null; this.admin = null; this.hydrated = false;
+      useProjectStore().resetScope();
       localStorage.removeItem("admin_token"); localStorage.removeItem("admin_profile");
     },
   },
 });
 ```
+
+`login()` 与 `logout()`（含 401、路由守卫 `fetchMe` 失败与修改密码路径）都会调用 `useProjectStore().resetScope()`，清空用户视角 `ownerId` 与当前项目 `currentId`，避免沿用上一个账号的选择（[13-user-data-scope](./13-user-data-scope.md) §12.2）。
 
 `localStorage` 中的 `admin_profile` 只用于首屏快速渲染菜单；刷新页面后路由守卫必须用 `/auth/me` 重新校验（`hydrated=false` 时），不能只凭本地是否存在令牌放行。
 
@@ -990,7 +995,7 @@ const visibleMenuGroups = computed(() =>
 
 ### 9.6 API 客户端（`apps/admin/src/api/client.ts`）
 
-- 请求拦截：从 store 读取 token 写 `Authorization: Bearer`，附带当前 locale（`lang` 查询参数或 `Accept-Language` 头，后端 `get_locale` 两者都接受）。
+- 请求拦截：从 store 读取 token 写 `Authorization: Bearer`，附带当前 locale（`lang` 查询参数或 `Accept-Language` 头，后端 `get_locale` 两者都接受）；总后台用户（`data_scope = all`）在 `store/project.ts` 的 `ownerId > 0` 时为 GET 请求（及少数检测触发接口）附加查询参数 `owner_id`，适用范围与不覆盖、不附加的规则以 [13-user-data-scope](./13-user-data-scope.md) §12.2 为准。
 - 响应拦截：`code !== 0` → `ElMessage.error(message)` 并 reject 原始体；成功返回 `data`。
 - HTTP 401：`auth.logout(false)`（不再调用 logout 接口），跳转 `/login?redirect=<当前路由>`；一次会话内只提示一次「登录已失效」。例外：请求 URL 为 `/admin/auth/login` 的 401（用户名或密码错误）不触发上述流程，原样 reject 交给 `Login.vue` 展示 `message`。
 - HTTP 403：**保留登录态**，按响应 `data` 区分：`data.permission` 存在（`require_permission` 拒绝，§7.2）→ 提示「无权执行此操作」，并调用 `auth.refreshPermissions()` 同步最新权限（用户组权限刚被修改的场景），若当前路由的 `meta.permission` 已不在新权限中，跳转 `/403`；`data` 为 `null`（§6.5 所列安全规则拒绝，含登录时账号或用户组已停用）→ 直接展示后端 `message`（如 §8.3 把最后一个有效超管移出 `super_admin` 组），不刷新权限、不跳转 `/403`。

@@ -687,12 +687,14 @@ POST /admin/admins
 同样创建 `user_b`（`group_id` 取 `GET /admin/admin-groups` 中 `code=operator` 的组 ID）。然后：
 
 1. 分别以 `user_a`、`user_b` 登录：`GET /admin/auth/me` 返回 `"data_scope": "own"`；顶栏没有用户视角切换器、显示「我的数据」；「项目」列表为空——前面步骤的示例项目负责人是 `admin`，对二人不可见。
-2. `user_a` 创建项目「A 的项目」并生成一批关键词（同第 3 步）；`user_b` 创建同名项目「A 的项目」也能成功（项目名按负责人唯一）。
+2. `user_a` 创建项目「A 的项目」并生成一批关键词（建项目同第 3 步、生成关键词同第 4 步，`project_id` 换成新项目的 ID）；`user_b` 用同样的 `name` 与 `slug` 创建项目「A 的项目」也能成功（`name` / `slug` 均按负责人唯一）。
 3. `user_b` 访问 `user_a` 的项目与关键词：`GET /admin/projects/{A 的项目 ID}`、`GET /admin/keywords/{A 的关键词 ID}` 均返回 `{ "code": 404, "message": "对象不存在", "data": null }`；`GET /admin/keywords?project_id={A 的项目 ID}` 返回空列表。
-4. `user_b` 回填第 10 步已回填过的 URL（需先有自己的 `approved` 内容）：返回 `{ "code": 409, "message": "该链接已由其他用户回填", "data": { "existing_id": null, "reason": "owned_by_other" } }`。
+4. `user_b` 回填第 10 步已回填过的 URL（前置：`user_b` 在自己的「A 的项目」中按第 4~6 步生成关键词、标题与内容，并 `POST /admin/contents/{id}/submit-review`；`operator` 没有 `content.contents.review`，需由 `admin`（`data_scope=all`）执行 `POST /admin/contents/{id}/approve`，使该内容成为 `approved`；再以 `user_b` 用这篇内容的 `content_id` 调 `POST /admin/links`）：返回 `{ "code": 409, "message": "该链接已由其他用户回填", "data": { "existing_id": null, "reason": "owned_by_other" } }`。
 5. 两人的「控制台」只统计各自项目：`GET /admin/stats/overview?range=7d` 的 `meta.scope="owner"`，`user_a` 的 `kpis.keywords_created` 等于其生成的数量，不含示例项目的数据。
-6. 用 `admin` 登录（`data_scope=all`）：顶栏出现用户视角切换器（`GET /admin/projects/owner-options` 列出 `admin` / `user_a` / `user_b`）；选「用户A」后所有列表与控制台只显示 `user_a` 的数据（请求自动附加 `owner_id`），与 `user_a` 本人所见一致；报表「分解」Tab 选维度「用户」（`GET /admin/stats/breakdown?dimension=owner&metric=keywords_created&start=…&end=…`）按用户列出关键词数。
-7. `admin` 把「A 的项目」的负责人改为 `user_b`（`PUT /admin/projects/{id}` `{"owner_id": <user_b 的 ID>}`）：因 `user_b` 已有同名项目返回 409；先把 `user_b` 的同名项目改名再转移即成功，之后 `user_a` 访问该项目返回 404，`user_b` 可见，项目下的关键词与统计随之转移。
+6. 用 `admin` 登录（`data_scope=all`）：顶栏出现用户视角切换器（`GET /admin/projects/owner-options` 列出全部启用用户，至少包含 `admin` / `user_a` / `user_b`，若按第 7 步新建过 `reviewer` / `operator` 账号也会出现；`project_count` 为各自负责的项目数，含已归档）；选「用户A」后所有列表与控制台只显示 `user_a` 的数据（请求自动附加 `owner_id`），与 `user_a` 本人所见一致；报表「分解」Tab 选维度「用户」（`GET /admin/stats/breakdown?dimension=owner&metric=keywords_created&start=…&end=…`）按用户列出关键词数。
+7. `admin` 把「A 的项目」的负责人改为 `user_b`（`PUT /admin/projects/{id}` `{"owner_id": <user_b 的 ID>}`）：因 `user_b` 已有同名同 slug 项目返回 409；先把 `user_b` 的项目改名并改 slug（`PUT /admin/projects/{id}` `{"name": "B 的项目", "slug": "b-proj"}`，`name` 或 `slug` 任一冲突都返回 409）再转移即成功，之后 `user_a` 访问该项目返回 404，`user_b` 可见，项目下的关键词与统计随之转移。
+
+第 5、6 项的流量类计数有延迟（同第 13 步）：今日尚未聚合（今日 `project_id=0` 的 `total` 行不存在）时，总览取 `stats:rt` 实时计数（`meta.today_source=realtime`），聚合后只取 `daily_stats`（`aggregate_today()` 每 `stats_config.intraday_refresh_seconds=600` 秒刷新）；`dimension=owner` 分解只读 `daily_stats` 的项目 `total` 行、没有实时兜底，新项目在下一次 `aggregate_today()` 之前不会出现；另有缓存（总览 `overview_cache_seconds=60` 秒、分解 300 秒）。需要立即核对时，先用 `admin` 按第 13 步重算今日（`POST /admin/stats/recompute`，`start_date` 与 `end_date` 均为今日；完成后清除 `cache:stats:*`）。
 
 ### 预期耗时（Mock）
 
@@ -924,7 +926,7 @@ PowerShell 下 `curl` 是 `Invoke-WebRequest` 的别名，用 `Invoke-RestMethod
 | 访问 `http://127.0.0.1:5174/admin/` 被拒绝连接，`localhost` 却正常 | `vite.config.ts` 未设 `server.host`，Vite 默认只监听 `localhost`，Node 18/20 上可能只绑定 IPv6 `::1` | 用 `http://localhost:5174/admin/` 访问 |
 | 浏览器报 CORS | 直连 8100 且来源不在 `ALLOWED_ORIGINS` | 加入 `ALLOWED_ORIGINS` 后重启 API，或改走 5174 代理 |
 | 登录提示账号已锁定 | 15 分钟内失败 ≥ 5 次（`ADMIN_LOGIN_MAX_FAILURES=5`，计数键 `rate:admin_login:{username}` TTL 900s） | 等 15 分钟自动解锁，或 `redis-cli DEL rate:admin_login:<username>` |
-| 登录成功后所有请求 401 | 重启时改了 `ADMIN_JWT_SECRET`；该管理员 `token_version` 已递增；管理员被禁用或所属用户组被停用 | 前两种重新登录即可；后两种重新登录会返回 403（「账号已禁用」/「用户组已停用」），需超级管理员在「管理员」或「用户组权限」页恢复 |
+| 登录成功后所有请求 401 | 重启时改了 `ADMIN_JWT_SECRET`；该管理员 `token_version` 已递增；管理员被禁用或所属用户组被停用 | 前两种重新登录即可；后两种重新登录会返回 403（「账号已禁用」/「用户组已停用」），需超级管理员在「用户管理」或「用户组权限」页恢复 |
 | 生成接口返回 429 | 每管理员频控 `generation_config.rate_limits.generate_per_admin=60/hour`（`rate:generate:{admin_id}`）或媒体 `media_per_admin=20/hour`（`rate:media:{admin_id}`）；手动收录检测固定 `30/hour`（`rate:index_check_manual:{admin_id}`） | 等待 `data.retry_after` 秒，或在「系统配置 → 生成 Tab」调高（手动收录检测频控不可配） |
 | 生成接口返回 5031 | 路由 `is_enabled=0`（真实模式未设默认模型）/ 候选全部 `is_available=0` / 存在 `ai:paused:*`（`data.paused_reason`） | 到「AI 网关 → 能力路由」填模型并启用；检查「AI 网关 → 模型目录」；暂停键见下行 |
 | `ai:paused:quota_exceeded` / `auth_failed` 存在，告警中心出现 `ai_quota_exceeded` / `ai_auth_failed` | 上游返回 402 / 401（额度不足或 Key 失效） | 充值或换 Key 后重启，再点任一路由「重置熔断」（`POST /admin/ai/routes/{id}/reset-breaker` 会删除暂停键）；不处理则暂停键在 `ai_routing_config.pause_seconds=600` 秒后自动过期、下一次失败再续写；暂停期间回滚为 `queued` 的任务（`pause_count += 1`，≥ 3 次改为 `failed`）由 `recover_stale_tasks` 自动补扫入队 |

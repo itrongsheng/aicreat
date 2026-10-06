@@ -662,7 +662,7 @@ alembic revision --autogenerate -m "add_xxx"
 - 大表（`ai_tasks`、`link_checks`、`index_checks`、`ai_usage_logs`、`daily_stats`）加索引用 MySQL 8 在线 DDL（`ALGORITHM=INPLACE, LOCK=NONE`），避免长时间锁表；上线前用生产快照在预发演练并记录耗时。
 - `settings` 配置键带 `version` 字段：新版本新增键或字段时靠深合并默认值兼容；需要改变语义时在 `ensure_default_settings` 中按 `version` 升级并保留管理员改动，不直接覆盖。
 - `alembic autogenerate` 对 `TEXT` JSON 列与 `DECIMAL` 精度可能产生无意义的差异，提交前人工审阅迁移脚本。
-- 用户系统（数据范围）的列与索引已并入 `0001_initial` / `0002_seed_permissions`；若数据库按此前的文档版本建成，按 [13-user-data-scope](./13-user-data-scope.md) §14 另写一次性迁移（`admin_groups.data_scope`、`projects.owner_id` 回填并改非空、按负责人的唯一索引、`media_assets` 新索引），上线前由总后台核对各项目负责人。
+- 用户系统（数据范围）的列与索引已并入 `0001_initial` / `0002_seed_permissions`；若数据库按此前的文档版本建成，按 [13-user-data-scope](./13-user-data-scope.md) §14 另写一次性迁移（`admin_groups.data_scope`、`projects.owner_id` 回填并改非空、按负责人的唯一索引、`media_assets` 新索引），上线前由总后台核对各项目负责人。该迁移不满足上条「向后兼容」规则（`projects.owner_id` 改非空、删除 `uq_projects_name` / `uq_projects_slug`），不走 §7.1 第 5 步的在线迁移：先 `bash scripts/db-backup.sh`，再 `docker compose stop server worker monitor-worker`，然后执行 `docker compose run --rm server sh -c "alembic upgrade head && python seeds/seed.py"`，完成后清除 Redis `cache:stats:*`（统计缓存键已加入 `scope_key` 段，见 13 §14 第 5 步），最后 `docker compose up -d`。回滚时不适用 §8.4「仅代码问题」（旧代码依赖全局唯一与可空的 `owner_id`），须按「迁移不可逆或数据已损坏」用备份恢复。
 - Redis 没有迁移：所有键自带 TTL 或可重建。若发布涉及键格式变化，可在停止三个应用容器后执行 `FLUSHDB`，后果与恢复方式见下表。
 
 | 被清空的键 | 后果 | 自动恢复 |

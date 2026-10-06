@@ -78,13 +78,13 @@ flowchart LR
 | 流量类指标 | range 内对 `daily_stats` 列求和，取 `dimension='total'` 行，`project_id` 按筛选（`0` = 全部项目汇总行） |
 | 快照类指标 | `*_snapshot` 列不求和，取 range 末日（趋势按周期末日）的行；末日尚无行时取 `stat_date <= 末日` 的最近一行，并在 `meta.snapshot_date` 标注实际取值日 |
 | 当前值指标 | 直接查询业务表当前状态（如 `COUNT … GROUP BY status`），不受 range 影响，只受 `project_id`（及榜单的 `platform`）影响 |
-| 今日兜底 | 今日的流量类数值优先取 `daily_stats(stat_date = 今日)`（`aggregate_today` 每 `intraday_refresh_seconds` 刷新一次）；该行不存在时取 `stats:rt:{date}:{project_id}` 的 Hash；二者不叠加。`meta.today_source` 标注 `daily_stats` / `realtime` / `none` |
+| 今日兜底 | 今日的流量类数值优先取 `daily_stats(stat_date = 今日)`（`aggregate_today` 每 `intraday_refresh_seconds` 刷新一次）；该行不存在时取 `stats:rt:{date}:{project_id}` 的 Hash；二者不叠加。是否已聚合以今日 `project_id=0` 的 `total` 行是否存在为准（各范围一致）：存在时 `owner` 范围对 P 内今日项目行求和（无行计 0），`today_source=daily_stats`；不存在时 `all` 范围取 `stats:rt:{date}:{project_id}`、`owner` 范围对 P 内各 `stats:rt:{date}:{pid}` 求和，`today_source=realtime`（[13-user-data-scope](./13-user-data-scope.md) §10.2）。`meta.today_source` 标注 `daily_stats` / `realtime` / `none` |
 | 尝试行口径 | 所有 AI 调用 / tokens / 额度 / 成本指标按 `ai_tasks` **尝试行**（`root_task_id IS NOT NULL`）统计：`status IN ('succeeded','failed')`、`trigger_type != 'health_probe'`，含未发起 HTTP 的 `model_unrouted` / `breaker_open` 行（`request_id IS NULL`，可经 `ai_failures_by_category` 区分）；根任务行一律不计，根任务 `expired` / `cancelled` 不计入任何 `ai_*` 列 |
 | 根任务口径 | 任务级指标（`tasks_succeeded` / `tasks_failed` / `task_success_rate` / `task_avg_duration_ms`）只按 `ai_tasks` **根任务行**（`root_task_id IS NULL`、`trigger_type != 'health_probe'`）统计：`succeeded` 为成功，`failed` / `expired` 为失败，`cancelled` 不计；回答「任务成功率与耗时」，与尝试行口径的 `ai_*` 指标并列展示，不可互换 |
 | 比率 | 以 0~1 小数返回（保留 4 位），分母为 0 返回 `null`；前端显示 `--`，CSV 留空；比率在周 / 月粒度与分解中一律由**分子分母先求和再相除**得到，不对日比率取平均 |
 | 额度与金额 | `quota_*` 为 zhiqiapi 原始整数额度（`BIGINT`）；`cost_cny` 为人民币元（6 位小数），只对 `ai_tasks.cost_cny` 求和，不按当前 `ai_routing_config.pricing` 重新折算，历史金额可复现 |
-| 项目 | `project_id=0` 为全部项目汇总行；已物理删除的项目其 `daily_stats` 行保留（重算不删除，§4.1 规则 3），分解 / 榜单中按 `#<project_id>` 显示 |
-| 数据范围 | 每个查询先确定范围键（[13-user-data-scope](./13-user-data-scope.md) §10.1）：总后台且未带 `owner_id` 为 `all`，按本表其余口径取数；普通用户本人或总后台带 `owner_id` 为 `owner:{id}`，此时 `project_id=0` 表示「该用户负责的全部项目」——取这些项目的行按相同 `dimension` / `dimension_key` 求和（流量列与快照列都可加和，快照按链接计数、各项目链接集合不相交），当前值指标附加 `project_id IN (该用户的项目)`，今日兜底对各项目的 `stats:rt:{date}:{project_id}` 求和，告警只计这些项目的告警；`project_id` 不属于该用户返回 404。不归属任何项目的数据（系统告警等）只出现在 `all` 范围 |
+| 项目 | `project_id=0` 为全部项目汇总行；已物理删除的项目其 `daily_stats` 行保留（重算不删除，§4.1 规则 3），分解 / 榜单中按 `#<project_id>` 显示（仅范围键 `all`；`owner:{id}` 范围下已删除项目不属于 P，见 [13-user-data-scope](./13-user-data-scope.md) §10.2） |
+| 数据范围 | 每个查询先确定范围键（[13-user-data-scope](./13-user-data-scope.md) §10.1）：总后台且未带 `owner_id` 为 `all`，按本表其余口径取数；普通用户本人或总后台带 `owner_id` 为 `owner:{id}`，此时 `project_id=0` 表示「该用户负责的全部项目」（即可见项目集 P，13 §2）——取这些项目的行按相同 `dimension` / `dimension_key` 求和（流量列与快照列都可加和，快照按链接计数、各项目链接集合不相交），当前值指标附加 `project_id IN (该用户的项目)`，今日兜底对各项目的 `stats:rt:{date}:{project_id}` 求和，告警只计这些项目的告警；`project_id` 不属于该用户返回 404。不归属任何项目的数据（系统告警等）只出现在 `all` 范围 |
 | 用户（负责人） | 仅分解接口的 `dimension=owner`：取各项目 `total` 行按 `projects.owner_id` 当前值分组，`key` 为用户 ID 字符串，标签同「人员」；已删除项目归入键 `0`（「已删除项目」）。与 `admin` 维度不同：`admin` 是操作人（`created_by` 等），`owner` 是数据归属人 |
 | 人员 | `dimension=admin`，`dimension_key` 为管理员 ID 字符串；标签取 `admins.display_name`，为空取 `admins.username` |
 | 平台 / 模型 / 能力 / 引擎 | `dimension_key` 分别为 `publish_platforms.code`、`ai_models.model_id`（或尝试行实际 `ai_tasks.model`）、能力枚举 `app.core.zhiqi.types.Capability`（`keyword` / `title` / `content` / `rewrite` / `image` / `video` / `geo_check` / `seo_check`，定义见 [08-zhiqiapi-integration](./08-zhiqiapi-integration.md)）、`seo_engine`（`baidu` / `bing` / `google`）与 `geo_engine`（`baidu_ai` / `doubao` / `kimi` / `deepseek` / `perplexity` / `chatgpt`，可在 `geo_engines` 扩展） |
@@ -176,7 +176,7 @@ flowchart LR
 | --- | --- | --- | --- |
 | `fastest_indexed` | 按 `first_indexed_at − published_at` 升序取前 N 的 contents（含链接与平台），range 按 `first_indexed_at` 过滤；只取补录延迟不超过 `MAX_BACKFILL_DELAY_HOURS`（72）小时的链接（`created_at <= published_at + INTERVAL 72 HOUR`），历史补录链接首次收录时间不可观测，不参与排名（见上文 `time_to_index_hours_avg`） | publish_links ⋈ contents | project |
 | `most_deleted_platforms` | range 内 `Σ links_deleted` 按 `dimension='platform'` 行降序 | daily_stats | platform |
-| `top_cost_models` / `top_cost_projects` | range 内 `Σ cost_cny` 按 `dimension='model'` 行 / `dimension='total'` 行按 `project_id` 分组（排除 `project_id=0`，已删除项目按 `project_id` 显示）降序 | daily_stats | model / project |
+| `top_cost_models` / `top_cost_projects` | range 内 `Σ cost_cny` 按 `dimension='model'` 行 / `dimension='total'` 行按 `project_id` 分组（排除 `project_id=0`；范围键 `all` 下已删除项目按 `project_id` 显示）降序 | daily_stats | model / project |
 | `top_failed_models` | range 内 `Σ ai_failed` 按 `dimension='model'` 行降序 | daily_stats | model |
 
 ### 3.3 两种收录率口径（必须并列展示）
@@ -405,8 +405,8 @@ sequenceDiagram
 | 键与类型 | Redis Hash `stats:rt:{date}:{project_id}`，字段名 = `daily_stats` 列名；`{date}` 为归属时间按 `stats_config.timezone` 换算出的日期；每次写入同时累加 `stats:rt:{date}:0` 汇总键 |
 | 写入时机 | 产生事件的 service 在事务提交后写入；只在归属日期 == 今日时写（归属到过去日期的事件，如回填 `published_at` 为 10 天前的链接导致的 `contents_published`，不写 Redis，由该日的重算体现）；整数列 `HINCRBY`，`cost_cny` 用 `HINCRBYFLOAT`；每次写入后 `EXPIRE key 259200` |
 | 不写入的列 | `quota_actual`、`quota_reconciled_calls`、`extra_json`（对账不回写此键）；全部 `*_snapshot` 列；维度行（Redis 只有 `total` 粒度，今日的平台 / 模型分解只能来自 `aggregate_today`） |
-| 读取 | `stats_service.realtime_today(project_id)`：`HGETALL` 后按列类型解析；Redis 不可用时返回空并在 `meta.warnings[]` 追加 `realtime_unavailable`，`today_source=none` |
-| 与 daily_stats 的关系 | 今日行存在时**只用 daily_stats**（最多滞后 `intraday_refresh_seconds`），不与 Redis 相加；今日行不存在时用 Redis；历史日期永远只用 daily_stats。Redis 计数不参与重算，也不要求与 daily_stats 严格一致 |
+| 读取 | `stats_service.realtime_today(scope, project_id)`：`all` 范围 `HGETALL stats:rt:{date}:{project_id}`；`owner` 范围下 `project_id>0`（已校验属于 P）同样读单键，`project_id=0` 时用 pipeline 对 P 内每个项目 `HGETALL stats:rt:{date}:{pid}` 后按字段求和，不读 `stats:rt:{date}:0` 汇总键（[13-user-data-scope](./13-user-data-scope.md) §10.2）；按列类型解析；Redis 不可用时返回空并在 `meta.warnings[]` 追加 `realtime_unavailable`，`today_source=none` |
+| 与 daily_stats 的关系 | 今日行（以今日 `project_id=0` 的 `total` 行为准，各范围一致，§3.1）存在时**只用 daily_stats**（最多滞后 `intraday_refresh_seconds`），不与 Redis 相加；今日行不存在时用 Redis；历史日期永远只用 daily_stats。Redis 计数不参与重算，也不要求与 daily_stats 严格一致 |
 
 事件 → 字段对照（写入点见各权威文档）：
 
@@ -480,7 +480,7 @@ sequenceDiagram
 
 | 控件 | 实现 | 行为 |
 | --- | --- | --- |
-| 用户视角（仅总后台） | 顶栏 `components/OwnerSelect.vue`，绑定 `store/project.ts` 的 `ownerId`（[13-user-data-scope](./13-user-data-scope.md) §12.2） | 「全部用户」= 不带 `owner_id`；选中用户后请求自动附加 `owner_id`，页面标题旁显示「正在查看 {用户}」；普通用户不显示，标题为「我的数据」 |
+| 用户视角（仅总后台） | 顶栏 `components/OwnerSelect.vue`，绑定 `store/project.ts` 的 `ownerId`（[13-user-data-scope](./13-user-data-scope.md) §12.2） | 「全部用户」= 不带 `owner_id`；选中用户后 GET 请求及两个检测 `run` 接口自动附加 `owner_id`（其它写请求不附加），内容区顶部显示 `el-alert`「正在查看用户 {name} 的数据」与「返回全部用户」按钮（13 §12.2）；普通用户不显示，标题为「我的数据」 |
 | 项目选择器 | `components/ProjectSelect.vue`，绑定 `store/project.ts`（持久化） | 「全部项目」= `project_id=0`（普通用户为本人全部项目）；只列可见项目；切换后重新请求 |
 | 时间范围 | `el-radio-group`：`today` / `7d` / `30d`，默认 `7d`，记忆在 `localStorage` 键 `aicreat.dashboard.range` | 切换后重新请求 |
 | 刷新 | `el-button` | 立即重新请求（服务端缓存 ≤ 60s，响应 `meta.cached=true` 时按钮旁提示「缓存数据」） |
@@ -607,7 +607,7 @@ interface TrendChartProps { dates: string[]; series: TrendSeries[]; height?: num
 ### 6.4 分解 Tab
 
 - 请求 `GET /admin/stats/breakdown`；左侧柱状图（前 10 项，其余合并为「其它」），右侧 `el-table`：键、标签、数值、占比 `share`（比率类指标占比显示 `--`）、操作（查看趋势）。
-- `dimension=project` 时排除 `project_id=0` 汇总行，已删除项目显示 `#<id>`；`dimension=owner`（仅总后台显示）按项目负责人汇总，点击行可切换到该用户视角（设置顶栏 `ownerId`）。
+- `dimension=project` 时排除 `project_id=0` 汇总行，已删除项目显示 `#<id>`（仅范围键 `all`）；`dimension=owner`（仅总后台显示）按项目负责人汇总，点击用户行可切换到该用户视角（设置顶栏 `ownerId` 为该行 `key`）；键 `0`（「已删除项目」）行不可点击（`ownerId=0` 表示「全部用户」，见 [13-user-data-scope](./13-user-data-scope.md) §12.2）。
 - 支持同时选择多个指标（`metric=a,b,c`，最多 8 个），表格增加对应列，排序与占比以第一个指标为准。
 
 ### 6.5 明细榜 Tab
@@ -632,7 +632,7 @@ interface TrendChartProps { dates: string[]; series: TrendSeries[]; height?: num
 ┌ 筛选：时间范围 │ 粒度 │ 项目 ┐
 ├ 汇总卡片：AI 调用 · 成功率 · tokens · 估算额度 · 实扣额度 · 对账率 · 费用（元）· 单篇内容成本   ┐
 ├ 趋势图：cost_cny（右轴）+ quota_estimated / quota_actual（左轴）按粒度                      │
-├ 按能力分解表 │ 按模型分解表 │ 按项目分解表（project_id=0 时显示）│ 按人员分解表 │ 按用户分解表（仅总后台）│
+├ 按能力分解表 │ 按模型分解表 │ 按项目分解表（project_id=0 时显示）│ 按人员分解表 │ 按用户分解表（仅总后台且 project_id=0 时显示）│
 └────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -640,7 +640,7 @@ interface TrendChartProps { dates: string[]; series: TrendSeries[]; height?: num
 | --- | --- | --- |
 | 汇总卡片 | `GET /admin/stats/trends?metrics=ai_calls,ai_success_rate,tokens_total,quota_estimated,quota_actual,quota_reconciled_rate,cost_cny,cost_cny_per_content&granularity=day&…` | 前端对流量列求和、对比率按分子分母重算；比率指标的分子分母列（`ai_succeeded`、`quota_reconciled_calls`、`contents_created`）由后端自动附带在响应中（§9.2），前端无需额外请求 |
 | 趋势图 | 同上响应 | `cost_cny` 右轴，`quota_estimated` / `quota_actual` 左轴 |
-| 分解表 | 每张表两次请求，`metric` 均不超过 8 个（§9.3）：① `GET /admin/stats/breakdown?dimension=capability\|model\|project\|admin\|owner&metric=ai_calls,ai_success_rate,tokens_total,quota_estimated,quota_estimated_reconciled,quota_actual,quota_reconciled_rate,cost_cny&…`（8 个）；② 同维度、同范围 `metric=task_success_rate,task_avg_duration_ms` | ① 决定行集合、排序与占比（以 `ai_calls` 为准），② 的 `values` 按 `key` 并入同一行（两次请求都返回范围内存在聚合行的全部键，键集合相同，§6.2）；「对账差异」`quota_diff` 与差异率 `quota_diff_rate` 不再请求，由前端按 §7.3 公式用同一行的 `quota_actual` 与 `quota_estimated_reconciled` 计算；表尾合计行；`dimension=admin` 时 ① 去掉 `quota_reconciled_rate`（`admin` 行不填 `quota_reconciled_calls`，§4.2，请求会被 400 拒绝），该列显示 `--` |
+| 分解表 | 每张表两次请求，`metric` 均不超过 8 个（§9.3）：① `GET /admin/stats/breakdown?dimension=capability\|model\|project\|admin\|owner&metric=ai_calls,ai_success_rate,tokens_total,quota_estimated,quota_estimated_reconciled,quota_actual,quota_reconciled_rate,cost_cny&…`（8 个）；② 同维度、同范围 `metric=task_success_rate,task_avg_duration_ms` | ① 决定行集合、排序与占比（以 `ai_calls` 为准），② 的 `values` 按 `key` 并入同一行（两次请求都返回范围内存在聚合行的全部键，键集合相同，§6.2）；「对账差异」`quota_diff` 与差异率 `quota_diff_rate` 不再请求，由前端按 §7.3 公式用同一行的 `quota_actual` 与 `quota_estimated_reconciled` 计算；表尾合计行；`dimension=admin` 时 ① 去掉 `quota_reconciled_rate`（`admin` 行不填 `quota_reconciled_calls`，§4.2，请求会被 400 拒绝），该列显示 `--`；按项目 / 按用户分解表只在 `project_id=0` 时显示（这两个维度忽略 `project_id`，§9.3） |
 
 ### 7.2 额度与费用换算
 
@@ -783,8 +783,8 @@ Authorization: Bearer <admin-token>
 
 - `kpis` 只含标量指标，字段集合以上例为准：§3.2 中的分布类指标（`*_by_status`、`alerts_open`、`*_by_engine`）放在 `breakdowns`，榜单、`ai_p95_duration_ms`、`ai_failures_by_category` 不在总览；当前值指标按 `project_id` 过滤，流量类按 range 求和，比率类（含任务级 `task_success_rate`）由 range 内分子、分母求和后相除，`*_by_engine` 按 `snapshot_date` 取快照。
 - `compare` 只含流量类与比率类指标；`previous` 为 0 时 `delta_rate=null`。
-- `breakdowns.cost_by_capability` / `breakdowns.cost_by_model` 分别来自 `daily_stats` 的 `capability` / `model` 行，range 内求和后按 `cost_cny` 降序各取最多 8 行；每行列为 `capability`（或 `model`）、`ai_calls`、`ai_success_rate`、`tokens_total`、`quota_estimated`、`quota_actual`、`cost_cny`、`share`（费用占比），`cost_by_capability` 另带任务级 `task_success_rate`、`task_avg_duration_ms`（`image` / `video` 行供「媒体成功率」卡片副值使用）；示例中 `cost_cny_per_content = 88.1 / 24`，只取 `content` / `rewrite` 行（示例期内无 `rewrite` 调用）。示例的 `cost_by_capability` 只列出部分能力行（`content` / `image` / `video`），实际返回当期有调用的全部能力（能力枚举共 8 个，最多 8 行），因此示例各行之和小于 `kpis` 合计（如 `ai_calls` 259 < 540，差额来自省略的 `keyword` / `title` 等行）；`cost_by_model` 示例三行即全部模型。`*_by_engine` 的 `total` 为同日 `total` 行的 `links_total_snapshot`；`snapshot_date` 当日不存在该引擎行（引擎未启用，或该项目无该引擎数据）时 `rate` 与 `hit` 均为 `null`。
-- `meta.computed_at` = range 内所取 `daily_stats` `total` 行 `computed_at` 的最大值（今日走 Redis 兜底时仍取已聚合行的最大值），range 内无任何行时为 `null`。
+- `breakdowns.cost_by_capability` / `breakdowns.cost_by_model` 分别来自 `daily_stats` 的 `capability` / `model` 行，range 内求和后按 `cost_cny` 降序各取最多 8 行；每行列为 `capability`（或 `model`）、`ai_calls`、`ai_success_rate`、`tokens_total`、`quota_estimated`、`quota_actual`、`cost_cny`、`share`（费用占比），`cost_by_capability` 另带任务级 `task_success_rate`、`task_avg_duration_ms`（`image` / `video` 行供「媒体成功率」卡片副值使用）；示例中 `cost_cny_per_content = 88.1 / 24`，只取 `content` / `rewrite` 行（示例期内无 `rewrite` 调用）。示例的 `cost_by_capability` 只列出部分能力行（`content` / `image` / `video`），实际返回当期有调用的全部能力（能力枚举共 8 个，最多 8 行），因此示例各行之和小于 `kpis` 合计（如 `ai_calls` 259 < 540，差额来自省略的 `keyword` / `title` 等行）；`cost_by_model` 示例三行即全部模型。`*_by_engine` 的 `total` 为同日 `total` 行的 `links_total_snapshot`；`snapshot_date` 当日不存在该引擎行（引擎未启用，或该项目无该引擎数据）时 `rate` 与 `hit` 均为 `null`。`owner` 范围下引擎集合取 `project_id=0` 的引擎行，`hit` / `total` 为 P 内各项目之和，无行计 0，`total=0` 时 `rate=null`（[13-user-data-scope](./13-user-data-scope.md) §10.2）。
+- `meta.computed_at` = range 内 `project_id=0` `total` 行 `computed_at` 的最大值（各范围一致；今日走 Redis 兜底时仍取已聚合行的最大值），range 内无行时为 `null`。
 - `meta.scope` = `all`（总后台未按用户筛选）或 `owner`（普通用户本人，或总后台带 `owner_id`），`meta.owner_id` 为后者的用户 ID；`owner` 范围下 `*_by_engine` 的引擎集合取同日 `project_id=0` 引擎行的键（启用引擎），`hit` 为该用户各项目引擎行之和（无行计 0），`total` 为其各项目 `links_total_snapshot` 之和（[13-user-data-scope](./13-user-data-scope.md) §10.2）。
 - `series` 的天数 = range 天数，但最少 7 天（`today` 时返回最近 7 天）；缺行的日期填 0。
 - 缓存键 `cache:stats:overview:{scope_key}:{project_id}:{range}`（`scope_key` = `all` 或 `owner:{owner_id}`），TTL `overview_cache_seconds`。
@@ -1030,7 +1030,7 @@ Content-Type: application/json
 | 对账回填晚于每日聚合 | `reconcile()` 对涉及日期逐日调用 `aggregate`，`quota_actual` / `quota_reconciled_calls` / `extra_json` 自动更新；前天在每日聚合时再算一次 |
 | 修改 `stats_config.timezone` | 新行按新时区切日，旧行不变；前端提示重算；`day_bounds` 以当前配置为准 |
 | `seo_providers` / `geo_engines` 停用某引擎 | 之后的日期不再生成该引擎行（当日仍有检测记录时例外）；历史行保留；分解表显示历史引擎键时标签回退为 code |
-| 删除平台 / 项目 | 项目行保留（重算不删除，§4.1 规则 3），分解 / 榜单中标签回退为 `#<id>`，`dimension=project` 的分解继续列出已删除项目；平台的链接删除后，其平台行在下次重算时按 §4.1 规则 3 消失，已存在且未重算的行显示时标签回退为 code |
+| 删除平台 / 项目 | 项目行保留（重算不删除，§4.1 规则 3）；范围键 `all` 下，分解 / 榜单中标签回退为 `#<id>`，`dimension=project` 的分解继续列出已删除项目；范围键 `owner:{id}` 下已删除项目不属于 P，其行不再计入该用户的总览 / 趋势 / 分解 / 榜单（[13-user-data-scope](./13-user-data-scope.md) §10.2），在 `dimension=owner` 中归入键 `0`（13 §10.3）；平台的链接删除后，其平台行在下次重算时按 §4.1 规则 3 消失，已存在且未重算的行显示时标签回退为 code |
 | 指标 / 维度参数不合法 | 400（§9.8），前端下拉已按矩阵过滤，正常操作不会触发 |
 | 导出超过 50,000 行 | 400，前端提示缩小时间范围或改用周 / 月粒度 |
 | Redis 不可用 | 查询缓存与实时计数降级（直接查库、今日按 `none`），聚合锁不可用时本轮聚合跳过并记 ERROR；`GET /api/v1/health` 返回 503 |
@@ -1078,7 +1078,7 @@ Content-Type: application/json
 - 比率：分母为 0 返回 `null`；`seo_index_rate` 分子限定在分母集合内且人工标记不增 `index_checks_done`；`*_by_engine` 使用 `links_total_snapshot` 作分母；`time_to_index_hours_avg` 趋势以 `index_hours_links` 作分母（历史补录链接计入 `seo_newly_indexed`，不计入 `index_hours_sum` / `index_hours_links`）。
 - 总览：今日有行时 `today_source=daily_stats` 且不叠加 Redis；无行时取 `stats:rt:*` 为 `realtime`；Redis 不可用为 `none` 并带 warning；环比窗口与 `delta_rate` 计算；`project_id` 过滤当前值指标；`series` 至少 7 天；`cost_by_capability` / `cost_by_model` 各 ≤ 8 行且含 `quota_estimated` / `quota_actual`，`cost_by_capability` 含 `task_success_rate` / `task_avg_duration_ms`；缓存命中 `meta.cached=true`，`aggregate` 后缓存被清除。
 - 趋势：周 / 月分组标签、流量列求和、快照列取周期末日、比率按分子分母重算；`task_success_rate` / `task_avg_duration_ms` 可按 `capability` / `model` / `admin` 维度请求；未知指标 / 超过 8 个 / 维度不匹配 / 跨度超限 → 400，`data` 为校验错误列表（未知指标 `type=unsupported_metric`、维度不匹配 `type=unsupported_dimension`，其余 `value_error`，§9.8）；`dimension != total` 缺 `dimension_key` → 400。
-- 分解：`dimension=project` 排除 `project_id=0` 且已删除项目标签为 `#<id>`；多指标 `values`；`share` 计算与比率指标 `share=null`；`value=0` 的键仍返回；同维度两次请求（如 AI 消耗分解表的 8 + 2 个指标）返回的键集合相同。
+- 分解：`dimension=project` 排除 `project_id=0`，范围键 `all` 下已删除项目标签为 `#<id>`，`owner:{id}` 下不出现；多指标 `values`；`share` 计算与比率指标 `share=null`；`value=0` 的键仍返回；同维度两次请求（如 AI 消耗分解表的 8 + 2 个指标）返回的键集合相同。
 - 榜单：五种类型的排序与 `limit` 上限；`fastest_indexed` 按 `first_indexed_at` 过滤、排除补录延迟超过 72 小时的历史补录链接（恰为 72 小时的计入），并包含链接与平台字段。
 - 导出：BOM、`\r\n`、文件名 `stats-{report}-{YYYYMMDD}.csv`（导出当日）、中文列头与 `EXPORT_COLUMNS` 列顺序（如趋势首行 `日期,AI 调用,费用（元）`）、`null` 留空、`cost_cny` 六位小数；超过 50,000 行 → 400；无 `stats.reports.export` → 403。
 - 重算：≤ 7 天同步执行并返回 `rows_upserted` / `skipped[]`；锁被占用时日期进入 `skipped[]`；> 7 天入队 `queue:stats_recompute`（校验队列元素）并返回 202；> 31 天或 `end_date` 晚于今日 → 400；操作日志 `action=execute`、`target_type=daily_stats`；`recompute` 任务在飞时主循环不 `LPOP`，队列元素不丢失、下一轮被消费。
@@ -1089,7 +1089,7 @@ Content-Type: application/json
 
 ### 管理端
 
-- 数据范围：普通用户标题为「我的数据」、无用户视角切换器、分解维度无「用户」；总后台切换用户后所有请求带 `owner_id` 并显示「正在查看」提示。
+- 数据范围：普通用户标题为「我的数据」、无用户视角切换器、分解维度无「用户」；总后台切换用户后所有 GET 请求带 `owner_id` 并显示「正在查看用户 {name} 的数据」提示条。
 - 总览：项目与范围切换触发请求并更新 URL 无关状态；`today_source` 徽标三态；KPI 环比箭头与反色规则；能力 / 模型消耗切换；无权限时卡片不可点击、告警摘要不渲染；骨架、错误重试、空数据引导；60s 自动刷新与隐藏暂停。
 - 报表：筛选同步到路由 query 并可刷新还原；维度切换后指标下拉按矩阵过滤、维度键候选按 §6.2 加载；周 / 月粒度的「不完整」角标；分解表「查看趋势」联动；榜单五种类型的列；AI 消耗 Tab 汇总卡片、分解表两次请求按 `key` 合并（`quota_diff` / `quota_diff_rate` 由前端计算，`metric` 每次不超过 8 个）与表尾合计行；导出按钮权限与文件下载；重算二次确认、`skipped[]` 提示、202 入队提示、300s 超时提示。
 - 主题与响应式：浅色 / 深色下图表重建、颜色正确；`< 768px` 布局；中英文文案完整无缺失 key。

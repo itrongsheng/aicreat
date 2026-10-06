@@ -20,7 +20,7 @@
 
 ### 2.1 三级产物链都归属项目
 
-关键词、标题、内容三类对象都带 `project_id`，彼此以 `keywords.id → titles.keyword_id → contents.title_id` 串联；内容另冗余 `keyword_id` 作为主关键词。项目提供语言、风格、格式、品牌信息、默认模板与默认模型（见 §4），生成表单据此预填，不需要重复填写。项目归档（`projects.status=archived`）后所有生成接口返回 409。项目负责人 `projects.owner_id` 决定这条产物链归谁：普通用户（数据范围 `own`）只能在自己负责的项目下生成、查看与编辑，生成接口的 `project_id`、`keyword_ids`、`title_ids`、`template_id` 指向不可见对象时与不存在相同（404 / 400），审核人员与总后台（`all`）可看到全部用户的产物（[13-user-data-scope](./13-user-data-scope.md)）。
+关键词、标题、内容三类对象都带 `project_id`，彼此以 `keywords.id → titles.keyword_id → contents.title_id` 串联；内容另冗余 `keyword_id` 作为主关键词。项目提供语言、风格、格式、品牌信息、默认模板与默认模型（见 §4），生成表单据此预填，不需要重复填写。项目归档（`projects.status=archived`）后所有生成接口返回 409。项目负责人 `projects.owner_id` 决定这条产物链归谁：普通用户（数据范围 `own`）只能在自己负责的项目下生成、查看与编辑，生成接口的 `project_id`、`keyword_ids`、`title_ids`、`template_id` 指向不可见对象时与不存在相同（各接口对不存在 ID 的既有响应，见 [13-user-data-scope](./13-user-data-scope.md) §8；`template_id` 为 404 `data=null`，§4.2），审核人员与总后台（`all`）可看到全部用户的产物（[13-user-data-scope](./13-user-data-scope.md)）。
 
 ### 2.2 API 只建任务，worker 执行
 
@@ -125,7 +125,7 @@ sequenceDiagram
 | `industry` / `audience` / `brand_name` / `brand_info` | 模板变量 `industry`、`audience`（请求未传时）、`brand_info`（`brand_name` 非空时拼为 `品牌：{brand_name}。{brand_info}`） |
 | `default_style` | 生成表单预填：标题生成与手工创建内容的 `style`（两个接口中 `style` 均为必填，服务端不补默认值） |
 | `default_format` | 生成表单预填：内容生成与手工创建内容的 `format`（两个接口中 `format` 均为必填，服务端不补默认值） |
-| `default_templates_json` | 以 `prompt_kind` 为键的 `{"<kind>": template_id}`，`resolve_template` 第一优先级；值必须是该 kind 的 `published` 模板（`PUT /admin/projects/{id}` 校验） |
+| `default_templates_json` | 以 `prompt_kind` 为键的 `{"<kind>": template_id}`，`resolve_template` 第一优先级；值必须是该 kind 的 `published` 模板，对调用者可见且 `project_id ∈ {0, 该项目}`（[13-user-data-scope](./13-user-data-scope.md) §7.1），否则 400（`POST /admin/projects` 与 `PUT /admin/projects/{id}` 校验，`data` 为校验错误列表，`loc=["body","default_templates","<kind>"]`，`type` 同 §4.2：`not_published`/`kind_mismatch`/`project_mismatch`，模板不存在、不可见或未发布均为 `not_published`，见 [04-api-spec](./04-api-spec.md) §7.3） |
 | `capability_routes(project_id=id)` | 项目级默认模型（主模型 + 备选链），经 `PUT /admin/projects/{id}/routes` 维护；解析规则见 [08-zhiqiapi-integration](./08-zhiqiapi-integration.md) |
 | `status` | `archived` 时所有生成/导入/新增接口返回 409 `data={"current_status":"archived"}`；查看与导出不受影响 |
 
@@ -140,18 +140,18 @@ sequenceDiagram
          rewrite / expand / shorten / restyle         → generation_config.rewrite.template_codes.<kind>
          image_prompt                                 → media_config.image.image_prompt_template_code（见 10）
          geo_query / seo_query                        → sys_geo_query / sys_seo_query（见 11）
-      两步都取该 code 的 published 版本，语言先匹配 projects.language，找不到再回退 zh-CN；
+      两步都取该 code 的 published 版本（② 只取 project_id=0 的全局版本），语言先匹配 projects.language，找不到再回退 zh-CN；
       仍为空 → 404 CODE_NOT_FOUND，data={"kind": "<kind>"}（§5.4）
 模型：请求级 model?（候选链固定为该模型，不切换备选）
       → capability_routes(project_id=项目) 覆盖行
       → capability_routes(project_id=0) 全局行
 ```
 
-`template_id?` 请求参数显式指定模板时跳过模板解析，但模板必须满足：`status=published`、`kind` 与接口要求一致、`project_id ∈ {0, 当前项目}`，否则 400，`data` 按 [04-api-spec](./04-api-spec.md) §5.1 的校验错误列表返回、以 `type` 区分原因（`kind_mismatch`/`not_published`/`project_mismatch`），如 `[{"loc":["body","template_id"],"msg":"模板 kind 不匹配","type":"kind_mismatch","input":12}]`。
+`template_id?` 请求参数显式指定模板时跳过模板解析。`template_id` 不存在或对调用者不可见（[13-user-data-scope](./13-user-data-scope.md) §4.2、§7.1）→ 404 `CODE_NOT_FOUND`、`data=null`（13 §8 的缺省语义，两种情况响应完全相同）；对可见模板再校验：`status=published`、`kind` 与接口要求一致、`project_id ∈ {0, 当前项目}`，否则 400，`data` 按 [04-api-spec](./04-api-spec.md) §5.1 的校验错误列表返回、以 `type` 区分原因（`kind_mismatch`/`not_published`/`project_mismatch`），如 `[{"loc":["body","template_id"],"msg":"模板 kind 不匹配","type":"kind_mismatch","input":12}]`。
 
 ### 4.3 项目页面职责
 
-`apps/admin/src/views/projects/Index.vue` 负责项目列表与新建/编辑弹窗（名称、slug、行业、受众、品牌名、品牌信息、说明、语言、默认风格、默认格式、负责人、常用平台）；「负责人」下拉取自 `GET /admin/projects/owner-options`，只对总后台显示（新建缺省为当前用户或顶栏所选用户，编辑时修改即转移负责人并二次确认），普通用户隐藏该字段、负责人恒为本人；名称与 slug 在同一负责人下唯一（[13-user-data-scope](./13-user-data-scope.md) §7.2）；`projects/Detail.vue` 分三个 Tab：概览（`GET /admin/projects/{id}/overview`，KPI 来自 [12-dashboard-reports](./12-dashboard-reports.md)）、默认模板（每个 `prompt_kind` 一个下拉，只列该 kind 的 `published` 模板，保存走 `PUT /admin/projects/{id}`）、默认模型（`keyword`/`title`/`content`/`rewrite` 四个文本能力各一行 `ModelSelect`（`modality=text`）+ 备选链，保存走 `PUT /admin/projects/{id}/routes`；`image`/`video`/`geo_check`/`seo_check` 行同页展示，含义见 08/10/11）。
+`apps/admin/src/views/projects/Index.vue` 负责项目列表与新建/编辑弹窗（名称、slug、行业、受众、品牌名、品牌信息、说明、语言、默认风格、默认格式、负责人、常用平台）；「负责人」下拉取自 `GET /admin/projects/owner-options`，只对总后台显示（新建缺省为当前用户或顶栏所选用户，编辑时修改即转移负责人并二次确认），普通用户隐藏该字段、负责人恒为本人；名称与 slug 在同一负责人下唯一（[13-user-data-scope](./13-user-data-scope.md) §7.2）；`projects/Detail.vue` 分三个 Tab：概览（`GET /admin/projects/{id}/overview`，KPI 来自 [12-dashboard-reports](./12-dashboard-reports.md)）、默认模板（每个 `prompt_kind` 一个下拉，只列该 kind、`project_id ∈ {0, 该项目}` 的 `published` 模板，保存走 `PUT /admin/projects/{id}`）、默认模型（`keyword`/`title`/`content`/`rewrite` 四个文本能力各一行 `ModelSelect`（`modality=text`）+ 备选链，保存走 `PUT /admin/projects/{id}/routes`；`image`/`video`/`geo_check`/`seo_check` 行同页展示，含义见 08/10/11）。
 
 ### 4.4 全局生成配置 `generation_config`
 
@@ -186,7 +186,7 @@ sequenceDiagram
 | `review_required` | `submit-review` 是否进入 `reviewing`；`false` 时直接 `approved`（§8.10） | 布尔 |
 | `keyword.default_count` / `max_count` | 关键词生成默认/最大数量 | `1 ≤ default_count ≤ max_count ≤ 100` |
 | `keyword.dedupe_scope` | 去重范围 | 首版固定 `project`（`UNIQUE(project_id, normalized_keyword)`） |
-| `keyword.default_template_code` / `title.default_template_code` / `content.template_codes.*` / `rewrite.template_codes.*` | 各 kind 默认模板 code | code 必须存在且有 `published` 版本，否则 400（校验错误列表，每个不合法 code 一项，如 `[{"loc":["body","value","title","default_template_code"],"msg":"该 code 无已发布版本","type":"template_not_published","input":"my_title"}]`） |
+| `keyword.default_template_code` / `title.default_template_code` / `content.template_codes.*` / `rewrite.template_codes.*` | 各 kind 默认模板 code | code 必须存在、其 `published` 版本为全局模板（`project_id=0`）且 `kind` 与该配置键对应，否则 400（校验错误列表，每个不合法 code 一项，`type` 为 `template_not_published`/`template_not_global`/`kind_mismatch`，如 `[{"loc":["body","value","title","default_template_code"],"msg":"该 code 无已发布版本","type":"template_not_published","input":"my_title"}]`） |
 | `keyword.intent_required` | 模型输出缺少/非法 `intent` 时：`true` → 映射为 `unknown` 并计入 `error_summary.intent_missing`；`false` → 直接 `unknown` 不计 | 布尔 |
 | `title.default_count` / `max_count` / `default_style` | 标题数量与全局默认风格 | `1 ≤ default ≤ max ≤ 20`；`content_style` 枚举 |
 | `content.outline_first` / `segmented` / `max_sections` | 内容生成默认：先大纲、分段生成、H2 小节上限 | `1 ≤ max_sections ≤ 20` |
@@ -268,7 +268,7 @@ sequenceDiagram
 
 ### 5.4 模板解析 `resolve_template(kind, project_id, language)`
 
-按 §4.2 顺序取第一个存在的 `published` 版本：先项目默认，再取该 kind 对应配置键的 code（不跨 kind 回退）；每一步先找 `language` 相同的，找不到回退 `zh-CN`；全部失败抛业务码 404 `CODE_NOT_FOUND`，`data={"kind": "<kind>"}`（[03-data-model](./03-data-model.md) `projects`）。系统模板的最后一个 `published` 版本禁止归档（`POST …/archive` 返回 409 `reason=last_published`），因此正常情况下解析不会为空。解析结果缓存在请求级（同一根任务内只解析一次），模板 ID 与版本写入 `generation_batches.template_id/template_version` 与 `contents.template_id`、`content_versions.template_id`、`ai_tasks.template_id`。
+按 §4.2 顺序取第一个存在的 `published` 版本：先项目默认，再取该 kind 对应配置键的 code（只取 `project_id=0` 的全局版本，不跨 kind 回退）；每一步先找 `language` 相同的，找不到回退 `zh-CN`；全部失败抛业务码 404 `CODE_NOT_FOUND`，`data={"kind": "<kind>"}`（[03-data-model](./03-data-model.md) `projects`）。系统模板的最后一个 `published` 版本禁止归档（`POST …/archive` 返回 409 `reason=last_published`），因此正常情况下解析不会为空。解析结果缓存在请求级（同一根任务内只解析一次），模板 ID 与版本写入 `generation_batches.template_id/template_version` 与 `contents.template_id`、`content_versions.template_id`、`ai_tasks.template_id`。
 
 ### 5.5 JSON 输出约定与校验
 
@@ -312,7 +312,7 @@ stateDiagram-v2
 - 同一 `code` 同时只有一个 `published`（service 校验）；`publish` 前校验 `user_prompt` 非空、变量引用合法、`output_format=json` 时 `output_schema_json` 可解析。
 - `PUT /admin/prompt-templates/{id}` 对 `published` 模板不原地修改，而是复制为同 code 的新 `draft`（`version = MAX(version)+1`）并返回新 ID；前端编辑器据此提示「已创建 v{n} 草稿」。
 - `POST /{id}/duplicate` 复制为新 code 的 `draft`（`{code,name}`），用于从系统模板派生项目模板（设置 `project_id`）。
-- 列表默认只返回每个 code 的最新版本，`?all_versions=1` 返回全部；`GET /{id}/versions` 返回同 code 全部版本，供编辑器版本面板对比。
+- 列表默认只返回每个 code 的最新可见版本，`?all_versions=1` 返回全部可见版本；`GET /{id}/versions` 返回同 code 的全部可见版本（按 [13-user-data-scope](./13-user-data-scope.md) §4.2 / §7.3 过滤，他人的全局草稿不列出），供编辑器版本面板对比。
 - 发布/归档权限 `content.prompt_templates.publish` 默认仅 `super_admin` 拥有（`OPERATOR_EXCLUDED` 排除 `operator`；`reviewer`/`read_only` 只有 `content.prompt_templates.view`，见 [07-admin-rbac](./07-admin-rbac.md)），运营人员只能起草与预览。
 - 可见性（[13-user-data-scope](./13-user-data-scope.md) §7.3）：项目模板随项目负责人可见；全局模板（`project_id=0`）的 `published`/`archived` 版本对所有用户只读可见，`draft` 只对创建人与总后台可见——普通用户起草的全局模板（含对已发布全局模板 `PUT` 复制出的新 `draft`）只有本人与总后台能看到，由总后台审阅后发布；`code` 全局唯一，被不可见模板占用时 409 `reason=owned_by_other`。
 - 已发布模板被业务对象引用（`generation_batches.template_id` 等）后仍可归档，历史记录保留模板 ID 与版本，不受影响。
@@ -939,7 +939,7 @@ stateDiagram-v2
 ### 10.2 Prompt 模板页
 
 - `Index.vue`：筛选 `kind`/`status`/`project_id`（全局/当前项目）/`keyword`；表格列：code、名称、kind、语言、范围（全局/项目）、版本、状态 `StatusTag`、系统标记、更新人/时间；操作：编辑（`published` 时提示将创建新版本草稿）、发布、归档、复制、删除（仅 draft 且非系统）、版本历史。
-- `Editor.vue`：左侧表单（code（新建时填，`sys_` 前缀禁用）、名称、kind（创建后只读）、语言、项目范围、说明、`output_format`、`model_params`（temperature/max_tokens/top_p）、`output_schema`（`JsonEditor.vue`）、变量表 `PromptVariablesForm.vue`（name/label/required/default，内置变量以只读 chip 列出可点击插入 `{{name}}`））；右侧 `system_prompt`/`user_prompt` 文本域 + 预览面板（`POST /{id}/preview`，示例变量可编辑，显示渲染后的 system/user）；底部版本列表（同 code 全部版本，可打开只读对比）。
+- `Editor.vue`：左侧表单（code（新建时填，`sys_` 前缀禁用）、名称、kind（创建后只读）、语言、项目范围、说明、`output_format`、`model_params`（temperature/max_tokens/top_p）、`output_schema`（`JsonEditor.vue`）、变量表 `PromptVariablesForm.vue`（name/label/required/default，内置变量以只读 chip 列出可点击插入 `{{name}}`））；右侧 `system_prompt`/`user_prompt` 文本域 + 预览面板（`POST /{id}/preview`，示例变量可编辑，显示渲染后的 system/user）；底部版本列表（同 code 全部可见版本，可打开只读对比）。
 
 ### 10.3 关键词页 `keywords/Index.vue`
 
@@ -995,7 +995,7 @@ stateDiagram-v2
 
 | 资源 | 接口（方法 路径） | 权限码 |
 | --- | --- | --- |
-| 项目 | `GET/POST /admin/projects`、`GET/PUT/DELETE /admin/projects/{id}`、`PUT /admin/projects/{id}/routes`、`POST /admin/projects/{id}/archive`、`/unarchive`、`GET /admin/projects/{id}/overview` | `content.projects.view/create/update/status/delete` |
+| 项目 | `GET/POST /admin/projects`、`GET /admin/projects/owner-options`（不分页，负责人候选，[13-user-data-scope](./13-user-data-scope.md) §6.4）、`GET/PUT/DELETE /admin/projects/{id}`、`PUT /admin/projects/{id}/routes`、`POST /admin/projects/{id}/archive`、`/unarchive`、`GET /admin/projects/{id}/overview` | `content.projects.view/create/update/status/delete` |
 | Prompt 模板 | `GET/POST /admin/prompt-templates`、`GET/PUT/DELETE /admin/prompt-templates/{id}`、`POST …/{id}/publish`、`/archive`、`/duplicate`、`/preview`、`GET …/{id}/versions` | `content.prompt_templates.view/create/update/publish/delete` |
 | 关键词 | `GET /admin/keywords`、`POST /admin/keywords`、`POST /admin/keywords/generate`、`/import`、`/import-file`、`GET /admin/keywords/export`、`GET/PUT/DELETE /admin/keywords/{id}`、`POST …/{id}/adopt`、`/discard`、`/restore`、`POST /admin/keywords/batch-status` | `content.keywords.view/create/generate/import/update/status/delete` |
 | 标题 | `GET /admin/titles`、`POST /admin/titles`、`POST /admin/titles/generate`、`GET/PUT/DELETE /admin/titles/{id}`、`POST …/{id}/score`、`/adopt`、`/discard`、`/restore`、`POST /admin/titles/batch-status` | `content.titles.view/create/generate/update/status/delete` |
@@ -1106,7 +1106,7 @@ Content-Type: application/json
 | --- | --- |
 | 项目已归档 | 生成/导入/新增返回 409 `current_status=archived`；只读与导出可用 |
 | 自定义模板必填变量缺失 | API 阶段 4221 `data.missing[]`，不建批次 |
-| 指定 `template_id` 不合法 | 400，`data` 为校验错误列表（`loc=["body","template_id"]`），`data[].type=kind_mismatch\|not_published\|project_mismatch`；缺省模板解析为空 → 404 `CODE_NOT_FOUND` `data.kind`（系统模板受归档保护，正常不会发生） |
+| 指定 `template_id` 不合法 | `template_id` 不存在或不可见 → 404 `CODE_NOT_FOUND`、`data=null`（[13-user-data-scope](./13-user-data-scope.md) §8）；可见但不满足 §4.2 → 400，`data` 为校验错误列表（`loc=["body","template_id"]`），`data[].type=kind_mismatch\|not_published\|project_mismatch`；缺省模板解析为空 → 404 `CODE_NOT_FOUND` `data.kind`（系统模板受归档保护，正常不会发生） |
 | 请求级 `model` 不可用或调用失败 | 创建时：模型不存在 / `is_available=0` / 模态不含 `text` → 400 `data={"model":…}`（[04-api-spec](./04-api-spec.md) §6.0）；覆盖模型熔断打开 → 5031 `data.hint="model_override"`；执行期覆盖模型上游调用失败 → 网关不切换备选、抛 5021 `data.hint="model_override"`（[08-zhiqiapi-integration](./08-zhiqiapi-integration.md)），worker 捕获后根任务 `failed(<error_category>)`，异步任务的 `error_message` 一律不附 hint 后缀；异步接口不会把 5021 返回前端，`data.hint` 只出现在 HTTP 同步路径（轮询结果中没有 `data.hint`）；前端以任务摘要（批次详情 `tasks[]`、`GET /admin/contents/{id}/task`、`GET /admin/media/assets/{id}/task`）的 `model_override`（取根任务 `input_json.model`）非空识别「使用了覆盖模型」（没有切换备选，§11），提示更换或去掉覆盖；上游拦截以 `error_category=content_blocked` 识别，`content_blocked` 与覆盖同时成立时按 `content_blocked` 提示修改输入（同步路径此时 `hint` 取 `prompt_blocked`） |
 | 全局暂停（`ai:paused:*`） | API 5031 `paused_reason`；队列中任务保持 `queued`；执行中的根任务在下一次上游调用前经 `check_paused()` 回滚为 `queued`（`pause_count+1`，§9.4）；暂停解除后由 `recover_stale_tasks` ③ 补扫入队 |
 | 频控 / 额度上限 | 429 `retry_after` / 4291 `scope`；前端按 `retry_after` 倒计时禁用按钮 |

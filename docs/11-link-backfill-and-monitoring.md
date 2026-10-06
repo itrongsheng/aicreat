@@ -73,10 +73,10 @@ flowchart LR
 | 入口 | 说明 |
 | --- | --- |
 | `POST /admin/links` | 单条回填 `{content_id, platform_id?, url, publish_account?, published_at?, note?}`，权限 `publish.links.create`，响应 `{link, queued}` |
-| `POST /admin/links/batch` | `{items:[…]}` 批量回填（≤ 100 条，超出 400）→ `{created, failed, results:[{index, ok, link_id, queued, code, message}]}`（逐条独立事务，整体返回 200，单条失败不影响其它条；成功条目 `code=0`；`url_hash` 重复时 `code=409`，`link_id` 为已存在链接 ID；与 [04-api-spec](./04-api-spec.md) §6.17、§7.10 一致） |
+| `POST /admin/links/batch` | `{items:[…]}` 批量回填（≤ 100 条，超出 400）→ `{created, failed, results:[{index, ok, link_id, queued, code, message, reason?}]}`（逐条独立事务，整体返回 200，单条失败不影响其它条；成功条目 `code=0`；`url_hash` 重复时 `code=409`，`link_id` 为已存在链接 ID；已存在链接对回填人不可见（属于其他用户的项目）时该条 `link_id=null`、`reason="owned_by_other"`、`message`「该链接已由其他用户回填」，不暴露对方链接 ID（[13-user-data-scope](./13-user-data-scope.md) §7.5、§8）；`reason` 仅在此情形出现；与 [04-api-spec](./04-api-spec.md) §6.17、§7.10 一致） |
 | `views/links/Index.vue` 回填弹窗、`views/contents/Editor.vue` 链接面板 | 均使用 `components/LinkBackfillDialog.vue`，调用上述接口 |
 
-`link_service.backfill(db, body, admin_id)` 依次校验，任一失败抛 `BusinessError`：
+`link_service.backfill(db, scope, body, admin_id)`（`scope` 由路由经 `get_data_scope` 传入，[13-user-data-scope](./13-user-data-scope.md) §9.3；`POST /admin/links/batch` 对每条传入同一 `scope`）依次校验，任一失败抛 `BusinessError`：
 
 | 序 | 校验 | 失败 |
 | --- | --- | --- |
@@ -87,6 +87,8 @@ flowchart LR
 | 5 | `url_hash = urls.url_hash(urls.normalize_url(url))` 唯一（全局，跨用户） | 409 `data.existing_id` = 已存在链接 ID（前端提示「该链接已回填」并可跳转详情）；已存在链接对回填人不可见（属于其他用户的项目）时 `data={"existing_id":null,"reason":"owned_by_other"}`，前端提示「该链接已由其他用户回填」，不暴露对方链接 |
 | 6 | `published_at` 缺省取当前时间；不得晚于当前时间 + 5 分钟（容忍时钟偏差）；不得早于当前时间 − 3650 天（防年份笔误）；**允许早于内容 `created_at`**（支持登记历史文章、补录早已发布的链接） | 400 `data=[{"loc":["body","published_at"],"msg":"…","type":"value_error","input":"2061-10-06T03:00:00Z"}]` |
 | 7 | `publish_account` ≤ 100 字符、`note` ≤ 500 字符 | 400 |
+
+> 本文其余 service 函数签名省略 `scope` 参数：按 [13-user-data-scope](./13-user-data-scope.md) §9.3、§9.4，凡读写 `publish_links`、`link_checks`、`index_checks`、`alerts` 等受范围约束表的函数（如 `link_check_service.check_link`、`index_check_service.run`、`alert_service.raise_alert`/`resolve_alert`/`evaluate`）都以 `scope` 为紧随 `db` 的必填参数：worker 与 monitor-worker 传 `SYSTEM_SCOPE`，路由（如 `rebaseline`、删除链接时的 `resolve_alert`）传本请求的 `scope`。
 
 ### 4.2 URL 规范化与哈希去重（`server/app/core/urls.py`）
 
@@ -647,7 +649,7 @@ def due(engine_state: dict | None, link, *, now, cfg) -> datetime | None:
 | `enabled` | `enabled_engines("geo")` 只看此字段（Mock 模式无「视为启用」特例，可逐个关闭） |
 | `model` | 真实模式必须是 `ai_models` 中 `is_available=1` 的文本模型，留空时该引擎**不可启用**（`PUT /admin/settings/geo_engines` 返回 400）；Mock 模式可留空（`model_override=None` 走 `mock-text`）。各引擎对应的联网模型 ID 以 zhiqiapi 模型目录为准 |
 | `protocol` | `openai_chat`/`openai_responses`/`anthropic_messages`，作为 `protocol_override` |
-| `prompt_template_code` | 默认 `sys_geo_query`，须为已发布模板 |
+| `prompt_template_code` | 默认 `sys_geo_query`，须为全局（`project_id=0`）已发布模板（`seo_providers.providers.zhiqi_web_search.prompt_template_code` 同此规则；校验错误格式同 [09-generation-pipeline](./09-generation-pipeline.md) §4.4） |
 | `extra` | 按引擎透传的上游字段（经 `ai_routing_config.passthrough` 白名单过滤后合并进请求体）；例如 `chatgpt` 走 Responses 协议需 `tools:[{"type":"web_search"}]` 才会联网检索；模型无法表达的托管工具会被上游移除而不会伪造；字段名以 zhiqiapi 官方文档为准 |
 | `parse.citation_source` | `annotations_or_markdown_links`：先取响应 `annotations`/`citations` 字段，无则解析回答中的 Markdown 链接与裸 URL |
 | `parse.match_mode` | `url`/`domain`/`url_or_domain`（默认）/`title`。前三者只按引用 URL/域名判定，无命中即 `not_cited`，不做标题兜底；`title` 只做标题近似，须显式配置，且该引擎 `prompt_template_code` 对应 `published` 模板的 `user_prompt` 不得含 `{{title}}`（`PUT /admin/settings/geo_engines` 校验，否则 400），避免模型复述提问中的标题就被判 `cited` |
@@ -948,7 +950,7 @@ def deliver(alert: Alert, event: str) -> list[str]: ...   # 返回成功投递�
 | 监控 | `is_monitoring` 开关（`pause`/`resume`） |
 | 操作 | 详情、立即检测（`check`）、收录检测（`index-check` 弹窗选 `kinds`/`engines`）、人工标记（`mark-index`）、重建基线（`rebaseline`，二次确认）、编辑、删除（二次确认） |
 
-筛选：全局项目选择器（`store/project.ts`）、`content_id`、`platform_id`、`alive_status`、`seo_indexed_any`、`geo_cited_any`、`is_monitoring`、`keyword`（标题/URL 模糊）、`published_start`/`published_end`；分页 `page/page_size`。工具栏：回填（`LinkBackfillDialog.vue`）、批量回填（粘贴多行「URL[,平台 code][,账号][,发布时间]」→ `POST /links/batch`；顶部显示 `created`/`failed`，逐条结果表列 `index`/`ok`/`link_id`/`queued`/`code`/`message`，`code=409` 时 `link_id` 为已存在链接、可跳转详情）、导出 CSV（`GET /links/export`，`utils/download.ts`）。列表在存在 `pending` 链接时经 `usePolling.ts` 每 3s 刷新，直到无 `pending`。
+筛选：全局项目选择器（`store/project.ts`）、`content_id`、`platform_id`、`alive_status`、`seo_indexed_any`、`geo_cited_any`、`is_monitoring`、`keyword`（标题/URL 模糊）、`published_start`/`published_end`；分页 `page/page_size`。工具栏：回填（`LinkBackfillDialog.vue`）、批量回填（粘贴多行「URL[,平台 code][,账号][,发布时间]」→ `POST /links/batch`；顶部显示 `created`/`failed`，逐条结果表列 `index`/`ok`/`link_id`/`queued`/`code`/`message`，`code=409` 且 `link_id` 非空时为已存在链接、可跳转详情；`link_id=null`（`reason=owned_by_other`）时显示 `message`「该链接已由其他用户回填」，不提供跳转）、导出 CSV（`GET /links/export`，`utils/download.ts`）。列表在存在 `pending` 链接时经 `usePolling.ts` 每 3s 刷新，直到无 `pending`。
 
 ### 11.3 链接详情与时间线（`views/links/Detail.vue`）
 
@@ -979,7 +981,7 @@ def deliver(alert: Alert, event: str) -> list[str]: ...   # 返回成功投递�
 
 - 删除检测：时间、链接（`link.url` + `platform_code`，取自列表接口每条附带的 `link{id,url,platform_code}`，点击跳转链接详情）、`check_type`、`result_status`、`previous_status → applied_status`、`http_status`、`matched_rule`、`redirect_count`、`hamming_distance`、耗时、触发人；筛选 `project_id`/`platform_id`/`result_status`/`check_type`/`link_id`/`start`/`end`；行点击打开 `EvidenceDrawer.vue`。
 - 收录检测：时间、`link_id`（列表接口不附链接信息，点击跳转链接详情）、`kind`、`engine`、`provider`、`result_status`、`match_mode`、`confidence`、`model`、`request_id`、`error_category`、耗时；筛选 `kind`/`engine`/`provider`/`result_status`/`project_id`/`platform_id`/`link_id`。
-- 工具栏「批量触发」：`POST /monitoring/link-checks/run` / `POST /monitoring/index-checks/run`（表单：项目、平台、`only_due`、kinds/engines），返回 `{enqueued, skipped}` 提示。
+- 工具栏「批量触发」：`POST /monitoring/link-checks/run` / `POST /monitoring/index-checks/run`（表单：项目、平台、`only_due`、kinds/engines），返回 `{enqueued, skipped}` 提示。总后台处于用户视角时请求自动附加 `owner_id`，未选项目则只对该用户负责项目下的链接入队（[13-user-data-scope](./13-user-data-scope.md) §7.5、§12.2）。
 
 ### 11.7 告警中心（`views/alerts/Index.vue`）与铃铛
 
@@ -1049,7 +1051,7 @@ Content-Type: application/json
 
 `link` 为扁平对象（`platform_id`，不嵌套 `platform`），字段集合与 [04-api-spec](./04-api-spec.md) §7.10 一致；`platform` 对象只出现在 `GET /admin/links/{id}` 详情中。`next_check_at` 为回填时刻 + 1h（基线已入队后的兜底，§4.4）。
 
-重复回填返回 `{"code": 409, "message": "链接已存在", "data": {"existing_id": 1}}`。
+重复回填返回 `{"code": 409, "message": "链接已存在", "data": {"existing_id": 1}}`；已存在链接对回填人不可见时返回 `{"code": 409, "message": "该链接已由其他用户回填", "data": {"existing_id": null, "reason": "owned_by_other"}}`（§4.1 第 5 条，[13-user-data-scope](./13-user-data-scope.md) §8）。
 
 ## 13. 配置与环境变量
 
@@ -1167,7 +1169,7 @@ Content-Type: application/json
 
 ### 16.2 后端集成测试
 
-- 回填事务：`publish_links` 插入（`next_check_at=now`，入队成功后推后 1h）、`contents.link_count`/`first_published_at`/`approved → published`、提交后 `stats:rt` 计数与基线入队；入队抛错（Redis 不可用）时链接已落库且 `next_check_at` 已到期，由 `schedule_link_checks` 以 `check_type=baseline` 补检（`check_count=0`，补检抓到 404 仍只记 `suspected_deleted`）；`published_at` 晚于当前 + 5 分钟或早于当前 − 3650 天返回 400，早于内容 `created_at` 允许；重复回填 409 带 `existing_id`；批量回填返回 `{created, failed, results[]}`，409 条目的 `link_id` 为已存在链接。
+- 回填事务：`publish_links` 插入（`next_check_at=now`，入队成功后推后 1h）、`contents.link_count`/`first_published_at`/`approved → published`、提交后 `stats:rt` 计数与基线入队；入队抛错（Redis 不可用）时链接已落库且 `next_check_at` 已到期，由 `schedule_link_checks` 以 `check_type=baseline` 补检（`check_count=0`，补检抓到 404 仍只记 `suspected_deleted`）；`published_at` 晚于当前 + 5 分钟或早于当前 − 3650 天返回 400，早于内容 `created_at` 允许；重复回填 409 带 `existing_id`（已存在链接属于其他用户项目时 `existing_id=null`、`reason=owned_by_other`）；批量回填返回 `{created, failed, results[]}`，409 条目的 `link_id` 为已存在链接，已存在链接属于其他用户项目（对回填人不可见）时该条目 `link_id=null`、`reason=owned_by_other`、`message`=「该链接已由其他用户回填」（[13-user-data-scope](./13-user-data-scope.md) §7.5、§8）。
 - 删除链接：级联记录、`link_count` 归零回 `approved`、该链接告警以 `resolved_by=NULL`、`resolution_note='auto'` 解决。
 - 删除 / 恢复闭环（覆盖 §17 第 4 条）：pytest 内起本地 HTTP 服务，测试夹具 monkeypatch `safe_fetch.assert_public_url`（放行回环地址）并放宽 `normalize_public_url` 的端口限制，仅在测试进程生效，生产代码不提供任何 SSRF 豁免。流程：回填 → 基线 200 得 `alive` 并写入 `baseline_*` → 页面改为 404（非基线 404 一次即 `deleted`）→ 断言 `link_checks.applied_status=deleted`、`publish_links.alive_status=deleted` 与 `link_deleted` 告警 → 恢复 200 → `alive`、`link_restored`（创建即 `resolved`）且 `link_deleted` 被自动解决；另测连续 2 次跳转首页确认 `deleted`，以及 `deleted` 状态下跳转仍保持 `deleted`。
 - 设置保存后的排程重算：关闭全部收录引擎后回填的链接 `next_index_check_at=NULL`，重新启用引擎并保存 `seo_providers`/`geo_engines` 后被重算。
@@ -1199,7 +1201,7 @@ Content-Type: application/json
 
 ## 17. 验收标准
 
-1. 运营可对 `approved`/`published` 内容回填单条/批量链接；非法 URL 返回 400，重复链接返回 409 并带 `existing_id`；回填后内容变为 `published`、`first_published_at` 正确，基线检测自动入队并在 `monitor_worker` 运行时 1 分钟内完成。
+1. 运营可对 `approved`/`published` 内容回填单条/批量链接；非法 URL 返回 400，重复链接返回 409 并带 `existing_id`（他人已回填的链接按第 10 条处理）；回填后内容变为 `published`、`first_published_at` 正确，基线检测自动入队并在 `monitor_worker` 运行时 1 分钟内完成。
 2. 平台自动识别覆盖 8 个内置平台；运营可维护 `url_patterns`/`deleted_markers`/`redirect_markers`/`fetch_config`，并用规则测试接口验证单个 URL，测试不写库。
 3. 删除检测严格遵守抓取限制（协议、端口、公网 IP、重定向 ≤ 3、2 MB、固定 UA、无 Cookie/JS），SSRF 测试用例全部被拒绝；判定规则与 §6.3 一致，`link_checks` 记录 `matched_rule` 与证据。
 4. 状态流转符合 §6.5 状态机：404 基线需二次确认、非基线立即 `deleted`、`unknown` 需连续 3 次、`changed` 可通过 `rebaseline` 恢复；`deleted` 状态下复检遇到跳转仍保持 `deleted`；删除与恢复分别产生 `link_deleted`/`link_restored` 告警并自动解决（完整闭环由 §16.2 的删除 / 恢复闭环集成测试验证；基线 404 → 手动检测 `deleted` → `link_deleted` 告警这一段另由 §16.4 冒烟脚本用公网 404 地址验证）。

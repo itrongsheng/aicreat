@@ -924,7 +924,7 @@ sequenceDiagram
 4. `response_meta_json`：尝试行记 `finish_reason`、`usage`、citations 数量、`http_status`、`usage_missing`、`degraded_params`、`fallback_from`、`retry_request_ids[]`；媒体根任务行另记 `poll:{last_request_id,last_http_status,error_code,error_message,request_ids[]（最近 ≤ 20 次）,consecutive_404}` 与 `download:{source,request_id,http_status,request_ids[]}`（转存下载记录，由 `transfer_media` 按下载函数返回的 `DownloadResult`（§5.2）写入：`source` ∈ `origin`（上游 origin 的 `upstream_url`，`stream_download`）/`content`（`GET /v1/videos/{id}/content`，`download_content`）/`cdn`（第三方 CDN，`safe_fetch.stream_public_bytes`，无上游请求号，`request_id` 为 null、`http_status` 为 CDN 最终响应状态码）/`mock`（`MockZhiqiClient` 复制占位文件）；每次下载调用——含失败、同一次转存内回退 `/content`、按 `transfer.retry_seconds` 的转存重试（转存共 3 次尝试，§8.3）——覆盖写最近一次的 `source`/`request_id`/`http_status`，并把 `DownloadResult.request_ids` 中的非空值追加到 `request_ids[]`（最近 ≤ 10 个）；下载失败时 `request_id`/`http_status` 取 `ZhiqiError(TRANSFER_FAILED)` 携带的值（未收到响应为 null，`request_id` 非空时同样追加），`source` 按本次所走的下载路径填写）；执行 `apply_generated` 的根任务行（关键词/标题生成）另记 `apply_counts:{duplicates,invalid,intent_missing,empty_output,too_long}`（本根任务的分项计数，由 `apply_generated` 在根任务终态同一事务写入，未用到的键记 0；供 `on_task_finished` 与 `recover_stale_tasks` ④ 按库汇总批次 `error_summary`，见 [09-generation-pipeline](./09-generation-pipeline.md) §9.3）；`recover_stale_tasks` ① 因「任一尝试行 `request_id` 非空且无结果」置 `failed(timeout)` 的根任务另记 `stale_after_submit: true`（与置 `failed(timeout)` 同一事务写入；汇总批次 `error_summary` 时该根任务计为 `stale_after_submit`、不计入 `timeout`，§7.5）。
 5. 业务对象指向：`keywords`/`titles`/`content_versions`/`index_checks.ai_task_id` 指向**产出结果的尝试行**；`contents`/`media_assets.ai_task_id` 指向**根任务**（前端轮询生命周期）。
 6. **同步执行的根任务**（`capability ∈ seo_check/geo_check` 的检测、`trigger_type=health_probe` 的探测、图片任务内嵌的 `operation=image_prompt`）不经 `queue:ai_tasks`、不经 `queued`：直接以 `running` 创建（`locked_by` = 执行进程、`heartbeat_at = started_at`）并在同一调用内写终态；不可 `cancel`/`retry`，僵死回收只置 `failed(timeout)`、不自动重试。
-7. 手动重试（`POST /admin/ai/tasks/{id}/retry`、批次 `retry`）与 `recover_stale_tasks` 自动重试都新建根任务并以 `parent_task_id` 关联旧根任务（复制 `operation`/`input_json`）。
+7. 手动重试（`POST /admin/ai/tasks/{id}/retry`、批次 `retry`）与 `recover_stale_tasks` 自动重试都新建根任务并以 `parent_task_id` 关联旧根任务（复制 `project_id`/`capability`/`operation`/`target_type`/`target_id`/`batch_id`/`input_json`，归属见 [13-user-data-scope](./13-user-data-scope.md) §9.4）。
 
 ### 7.5 `ai_tasks` 状态机（`ai_task_status`）
 
@@ -979,7 +979,7 @@ stateDiagram-v2
 | `GET /admin/ai/tasks` | `ai.tasks.view` | 分页；筛选 `row_kind`（`root` 默认 / `attempt` / `all`）、`project_id`、`capability`、`operation`、`model`、`status`、`error_category`、`trigger_type`、`batch_id`、`root_task_id`、`target_type`、`target_id`、`request_id`、`start`、`end`（尝试行筛选依赖 §7.4 第 1 条的冗余列） |
 | `GET /admin/ai/tasks/export` | `ai.tasks.view` | CSV（UTF-8 BOM，最多 50,000 行，超出 400；同列表筛选，默认 `row_kind=attempt`；列含脱敏请求摘要、`request_id`、tokens、额度、成本） |
 | `GET /admin/ai/tasks/{id}` | `ai.tasks.view` | 详情：`input`、脱敏 `request_payload`、`response_meta`（媒体根任务含 `poll` 轮询记录与 `download` 下载记录）、对账信息（`quota_actual`/`reconciled_at`/`usage_log_type`）；根任务附 `attempts[]` 尝试行列表 |
-| `POST /admin/ai/tasks/{id}/retry` | `ai.tasks.retry` | 仅接受根任务 `failed`/`expired` 且 `capability ∈ TEXT_CAPABILITIES`、`target_type ∈ {generation_batch, keyword, content}`、`trigger_type != health_probe`、`operation ∉ {seo_check, geo_check, route_probe, image_prompt}` → 新建根任务（`parent_task_id`，复制 `operation`/`input_json`）重新入队；有批次时同事务 `task_failed −1` 并把批次置回 `running`（`task_total` 不变，[09-generation-pipeline](./09-generation-pipeline.md) §9.3/§9.7）；该根任务已有重试根任务（存在 `parent_task_id` = 该根任务的行，同一旧根任务只能有一个重试根任务，见 [03-data-model](./03-data-model.md)「任务幂等与状态收敛」第 6 条）→ 409 `data={"existing_id": 该重试根任务 ID}`；媒体根任务 409 `data={"hint":"POST /admin/media/assets/{asset_id}/retry"}`，收录检测根任务 409 `data={"hint":"POST /admin/links/{link_id}/index-check"}`，探测任务 409 |
+| `POST /admin/ai/tasks/{id}/retry` | `ai.tasks.retry` | 仅接受根任务 `failed`/`expired` 且 `capability ∈ TEXT_CAPABILITIES`、`target_type ∈ {generation_batch, keyword, content}`、`trigger_type != health_probe`、`operation ∉ {seo_check, geo_check, route_probe, image_prompt}` → 新建根任务（`parent_task_id`，复制 `project_id`/`capability`/`operation`/`target_type`/`target_id`/`batch_id`/`input_json`，归属见 [13-user-data-scope](./13-user-data-scope.md) §9.4）重新入队；有批次时同事务 `task_failed −1` 并把批次置回 `running`（`task_total` 不变，[09-generation-pipeline](./09-generation-pipeline.md) §9.3/§9.7）；该根任务已有重试根任务（存在 `parent_task_id` = 该根任务的行，同一旧根任务只能有一个重试根任务，见 [03-data-model](./03-data-model.md)「任务幂等与状态收敛」第 6 条）→ 409 `data={"existing_id": 该重试根任务 ID}`；媒体根任务 409 `data={"hint":"POST /admin/media/assets/{asset_id}/retry"}`，收录检测根任务 409 `data={"hint":"POST /admin/links/{link_id}/index-check"}`，探测任务 409 |
 | `POST /admin/ai/tasks/{id}/cancel` | `ai.tasks.cancel` | 根任务 `queued`/`polling` → `cancelled`（`error_category=cancelled`；`polling` 时不调用上游取消、仅本地放弃；`settle_quota` 释放预占）；媒体根任务同事务把资产置 `failed(error_category=cancelled, failed_at=now)`（不触发 `media_task_failed` 告警）；内容任务恢复 `prev_status`；同步执行的根任务（§7.4 第 6 条）返回 409 |
 
 页面 `ai/Tasks.vue`：顶部 `row_kind` 切换（根任务 / 尝试行 / 全部）与筛选条；表格列 `id`、`capability`、`operation`、`model`、`protocol`、`status`（`StatusTag.vue`）、`error_category`、`request_id`、`prompt_tokens`/`completion_tokens`、`quota_estimated`/`quota_actual`、`cost_cny`、`duration_ms`、`created_at`；根任务行可展开 `attempts[]`（`candidate_index`、`attempt`、`segment_index`、`protocol`、`request_id`、`http_status`、`error_category`、`upstream_latency_ms`）；行操作「重试」（`v-permission="'ai.tasks.retry'"`）与「取消」（`v-permission="'ai.tasks.cancel'"`）按上表状态条件禁用；详情抽屉以 `JsonEditor.vue` 只读展示 `input`/`request_payload`/`response_meta`；「导出 CSV」沿用 `ai.tasks.view`；进行中的根任务由 `usePolling.ts` 可见时 3s 轮询刷新。
@@ -1216,8 +1216,9 @@ sequenceDiagram
 | `GET /admin/ai/usage/logs` | `ai.usage.view` | 分页 `ai_usage_logs`；筛选 `model_name`/`log_type`/`matched`/`request_id`/`start`/`end` |
 | `POST /admin/ai/usage/reconcile` | `ai.usage.reconcile` | 立即对账（锁 `lock:worker:reconcile`；Mock 同样执行） |
 | `GET /admin/ai/usage/summary` | `ai.usage.view` | `?group_by=model\|capability\|project\|day&start&end` → `[{key,calls,prompt_tokens,completion_tokens,quota_estimated,quota_actual,cost_cny,reconciled_rate}]`（按尝试行） |
+| `GET /admin/ai/usage/last-pull` | `ai.usage.view` | 读 `ai:usage:last_pull`（键不存在时 `data=null`）；`all` 范围返回 `{pulled_at,pulled,new,matched,unmatched,window_overflow,request_ids[]}`，`own` 范围（或带 `owner_id`）只返回 `{pulled_at,window_overflow}`（[13-user-data-scope](./13-user-data-scope.md) §4.3） |
 
-页面 `ai/Usage.vue`：顶部展示 `ai:usage:last_pull`（最近拉取时间、条数、匹配/未匹配、`window_overflow` 警示）与「立即对账」按钮（`v-permission="'ai.usage.reconcile'"`）；汇总 Tab（按模型/能力/项目/日）与日志 Tab（`matched` 筛选、`request_id` 搜索、点击跳转 `ai/Tasks.vue` 对应尝试行）。
+页面 `ai/Usage.vue`：顶部展示最近一次对账摘要（`GET /admin/ai/usage/last-pull`，源自 `ai:usage:last_pull`；总后台显示拉取时间、条数、匹配/未匹配与 `window_overflow` 警示，`own` 范围或用户视角只显示拉取时间与 `window_overflow` 警示，[13-user-data-scope](./13-user-data-scope.md) §12.3）与「立即对账」按钮（`v-permission="'ai.usage.reconcile'"`）；汇总 Tab（按模型/能力/项目/日）与日志 Tab（`matched` 筛选、`request_id` 搜索、点击跳转 `ai/Tasks.vue` 对应尝试行）。
 
 ## 11. 模型目录与价格同步
 
@@ -1430,7 +1431,7 @@ Content-Type: application/json
 | 健康探测结果与延迟 | `ai:health:*`、`ai_models.last_health_*` | `ai_upstream_unavailable`（critical，连续 2 次失败） |
 | 全局暂停 | `ai:paused:*` | `ai_quota_exceeded` / `ai_auth_failed`（critical） |
 | `quota_estimated`、`quota_actual`、`cost_cny`、`quota_reconciled_rate` | `daily_stats`（尝试行） | 成本看板；`quota_reconciled_rate` 持续下降提示对账窗口溢出 |
-| 对账摘要 `pulled/new/matched/unmatched/window_overflow` | `ai:usage:last_pull` | `Usage.vue`；`window_overflow` 记 warning 日志 |
+| 对账摘要 `pulled/new/matched/unmatched/window_overflow` | `ai:usage:last_pull` | `Usage.vue`（经 `GET /admin/ai/usage/last-pull`，计数仅 `all` 范围可见）；`window_overflow` 记 warning 日志 |
 | 本地额度使用率 | `quota:daily:{date}`、`quota:project:*` 对比 `generation_config.quota.*`（`warn_percent=80`） | 文本与媒体（图片/视频）生成接口在达到预警线时响应附可选 `quota_warning`，生成页提示；上限为 0 表示不限、不预警（见 09 §9.6、10 §4.11） |
 | 目录同步结果 `total/added/updated/unavailable` | `sync_models` 返回值与日志 | 模型下架提示；`ai_breaker_open(reason=model_unavailable)` |
 | 队列与轮询积压 | `LLEN queue:ai_tasks`、`ai_tasks` 中 `queued`/`polling` 计数、`WORKER_STALE_TASK_MINUTES` 回收数 | worker 健康；`worker_stale`（warning） |
@@ -1470,7 +1471,7 @@ Content-Type: application/json
 - `Models.vue`：筛选、`include_hidden`、同步按钮权限与返回提示、`raw_pricing` 抽屉。
 - `Routes.vue`：路由列表健康/熔断标签、编辑弹窗 `ModelSelect` 按模态过滤、备选链排序、一键测试结果表与 `probe_media` 复选框、重置熔断、暂停告警条。
 - `Tasks.vue`：`row_kind` 切换、根任务展开 `attempts[]`、`error_category`/`request_id` 展示与筛选、重试/取消按钮按状态与权限禁用、CSV 导出。
-- `Usage.vue`：`last_pull` 摘要、立即对账、汇总与日志 Tab、跳转任务。
+- `Usage.vue`：`last-pull` 摘要（`own` 范围只返回 `pulled_at`/`window_overflow`）、立即对账、汇总与日志 Tab、跳转任务。
 - 无权限时菜单、按钮与直接接口访问均被阻止；浅色/深色主题与移动端布局正常。
 
 ## 17. 验收标准
