@@ -1,4 +1,5 @@
 // 前后端共享常量。上传限制为前端预检默认值（与 MAX_IMAGE_SIZE_MB / MAX_VIDEO_SIZE_MB 默认一致），以后端为准。
+import type { Modality } from "./enums";
 
 export const API_PREFIX = "/api/v1";
 export const DEFAULT_PAGE_SIZE = 20;
@@ -22,6 +23,21 @@ export type VideoResolution = (typeof VIDEO_RESOLUTIONS)[number];
 
 export const CAPABILITIES = ["keyword", "title", "content", "rewrite", "image", "video", "geo_check", "seo_check"] as const;
 export type Capability = (typeof CAPABILITIES)[number];
+
+/** 文本类能力（与后端 `app.core.zhiqi.types.TEXT_CAPABILITIES` 一致，docs/08 §5.2） */
+export const TEXT_CAPABILITIES = ["keyword", "title", "content", "rewrite", "geo_check", "seo_check"] as const satisfies readonly Capability[];
+
+/** 能力 → 模态（`ai_models.modalities_json`；`ModelSelect.vue` 按此过滤，docs/08 §5.2 `MODALITY_OF`） */
+export const MODALITY_OF: Record<Capability, Modality> = {
+  keyword: "text",
+  title: "text",
+  content: "text",
+  rewrite: "text",
+  geo_check: "text",
+  seo_check: "text",
+  image: "image",
+  video: "video",
+};
 
 export const BUSINESS_CODES = {
   BAD_REQUEST: 400, UNAUTHORIZED: 401, FORBIDDEN: 403, NOT_FOUND: 404, CONFLICT: 409, RATE_LIMITED: 429,

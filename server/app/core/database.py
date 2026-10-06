@@ -6,7 +6,8 @@ ORM 不使用 MySQL 专有列类型，service 中的写入保持方言无关。
 
 from __future__ import annotations
 
-from collections.abc import Generator, Iterator
+import logging
+from collections.abc import Callable, Generator, Iterator
 from contextlib import contextmanager
 from typing import Any
 
@@ -93,3 +94,39 @@ def session_scope() -> Iterator[Session]:
         raise
     finally:
         db.close()
+
+
+# =====================================================================
+# 提交后回调（docs/03「事务边界总则」：Redis 写入在事务提交之后）
+# =====================================================================
+
+_AFTER_COMMIT_KEY = "aicreat_after_commit"
+_after_commit_logger = logging.getLogger("app.core.database")
+
+
+def after_commit(session: Session, fn: Callable[[], Any]) -> None:
+    """登记一个在 ``session`` 下一次成功 ``commit`` 之后执行的回调（入队、``stats:rt`` 计数、缓存失效、告警投递）。
+
+    事务回滚时回调被丢弃；回调内不得再使用该 ``session`` 发 SQL（需要时自行新开会话）；回调异常只记日志。
+    """
+    session.info.setdefault(_AFTER_COMMIT_KEY, []).append(fn)
+
+
+def pending_after_commit(session: Session) -> int:
+    """尚未执行的提交后回调数（测试与诊断用）。"""
+    return len(session.info.get(_AFTER_COMMIT_KEY) or [])
+
+
+@event.listens_for(Session, "after_commit")
+def _run_after_commit(session: Session) -> None:
+    callbacks = session.info.pop(_AFTER_COMMIT_KEY, None) or []
+    for fn in callbacks:
+        try:
+            fn()
+        except Exception:  # noqa: BLE001 - 提交后动作失败不影响已提交的事务
+            _after_commit_logger.exception("提交后回调执行失败: %r", fn)
+
+
+@event.listens_for(Session, "after_rollback")
+def _discard_after_commit(session: Session) -> None:
+    session.info.pop(_AFTER_COMMIT_KEY, None)

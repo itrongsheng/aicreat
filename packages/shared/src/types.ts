@@ -21,6 +21,7 @@ import type {
   ContentStatus,
   ContentStyle,
   DataScope,
+  DownloadSource,
   ErrorCategory,
   GeoCiteStatus,
   GeoEngine,
@@ -857,7 +858,7 @@ export interface AiTaskResponseMeta {
     request_ids: string[];
   };
   download?: {
-    source: "origin" | "content" | "cdn" | "mock";
+    source: DownloadSource;
     request_id: string | null;
     http_status: number | null;
     request_ids: string[];
@@ -1060,6 +1061,42 @@ export interface AiUsageSummaryRow {
   cost_cny: number;
   reconciled_rate: number | null;
 }
+
+/**
+ * `GET /admin/ai/usage/last-pull`（Redis `ai:usage:last_pull`；键不存在时接口 `data=null`）。
+ * `all` 范围（未带 `owner_id`）返回完整摘要；`own` 范围（或带 `owner_id`）只返回 `pulled_at` / `window_overflow`（docs/13 §4.3）。
+ */
+export interface UsageLastPull {
+  pulled_at: string;
+  window_overflow: boolean;
+  pulled?: number;
+  new?: number;
+  matched?: number;
+  unmatched?: number;
+  request_ids?: string[];
+}
+
+/** `POST /admin/ai/tasks/{id}/retry` */
+export interface AiTaskRetryResult {
+  task_id: number;
+}
+
+/** `POST /admin/ai/routes` 请求体（项目覆盖路由，`project_id > 0`） */
+export interface CapabilityRouteCreateBody {
+  capability: Capability;
+  project_id: number;
+  protocol: Protocol;
+  primary_model: string;
+  fallback_models: string[];
+  params: Record<string, unknown>;
+  timeout_seconds: number | null;
+  max_attempts: number;
+  is_enabled: boolean;
+  note: string | null;
+}
+
+/** `PUT /admin/ai/routes/{id}` 请求体：`capability` / `project_id` 不可改 */
+export type CapabilityRouteUpdateBody = Partial<Omit<CapabilityRouteCreateBody, "capability" | "project_id">>;
 
 // =====================================================================
 // 发布平台、回填链接与检测（04 §6.16~§6.18、§7.10~§7.12）

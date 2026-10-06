@@ -7,8 +7,6 @@
 
 from __future__ import annotations
 
-import importlib
-import importlib.util
 import logging
 import re
 import shutil
@@ -33,7 +31,7 @@ from app.core.exceptions import CODE_BAD_REQUEST, CODE_NOT_FOUND, BusinessError,
 from app.core.locks import LockTimeout, with_lock
 from app.core.storage import InvalidStorageKey, LocalStorage, get_storage, guess_content_type, validate_storage_key
 from app.models import Admin
-from app.services import admin_rbac_service, settings_service
+from app.services import admin_rbac_service, ai_gateway_service, settings_service
 
 logger = logging.getLogger("app.main")
 
@@ -233,15 +231,11 @@ def _route_template(app: FastAPI, request: Request) -> str | None:
 
 
 def run_ensure_steps() -> None:
-    """``ensure_rbac_seed`` → ``ensure_default_settings`` → ``ensure_default_routes``（第 3 步实现后自动启用）。"""
+    """``ensure_rbac_seed`` → ``ensure_default_settings`` → ``ensure_default_routes``（全部幂等；``app.worker`` 复用）。"""
     with SessionLocal() as db:
         admin_rbac_service.ensure_rbac_seed(db)
         settings_service.ensure_default_settings(db)
-        if importlib.util.find_spec("app.services.ai_gateway_service") is not None:
-            gateway = importlib.import_module("app.services.ai_gateway_service")
-            ensure_routes = getattr(gateway, "ensure_default_routes", None)
-            if callable(ensure_routes):
-                ensure_routes(db)
+        ai_gateway_service.ensure_default_routes(db)
 
 
 def bootstrap() -> None:

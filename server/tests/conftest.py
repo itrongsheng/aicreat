@@ -85,6 +85,18 @@ def _clean_redis() -> Iterator[None]:
         redis_client.flushdb()
 
 
+@pytest.fixture(autouse=True)
+def _zhiqi_mock_fast(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """测试中 MockZhiqiClient 不 sleep 模拟延迟（latency_ms 照常非 0），并在前后重置 ``get_client()`` 单例。"""
+    from app.core.zhiqi import mock as zhiqi_mock
+    from app.core.zhiqi.client import reset_client
+
+    monkeypatch.setattr(zhiqi_mock, "SIMULATE_LATENCY", False)
+    reset_client()
+    yield
+    reset_client()
+
+
 @pytest.fixture
 def redis_required() -> None:
     if not redis_is_db15():

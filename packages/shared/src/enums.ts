@@ -181,6 +181,18 @@ export type ZhiqiMode = (typeof ZHIQI_MODE)[number];
 export const USAGE_LOG_TYPE = [2, 5, 6] as const;
 export type UsageLogType = (typeof USAGE_LOG_TYPE)[number];
 
+/** `GET /admin/ai/tasks?row_kind=`：根任务行 / 尝试行 / 全部（docs/08 §7.7） */
+export const AI_TASK_ROW_KIND = ["root", "attempt", "all"] as const;
+export type AiTaskRowKind = (typeof AI_TASK_ROW_KIND)[number];
+
+/** `GET /admin/ai/usage/summary?group_by=`（docs/08 §10.7） */
+export const USAGE_SUMMARY_GROUP_BY = ["model", "capability", "project", "day"] as const;
+export type UsageSummaryGroupBy = (typeof USAGE_SUMMARY_GROUP_BY)[number];
+
+/** 媒体根任务 `response_meta.download.source`（docs/08 §5.2 `DownloadResult.source`） */
+export const DOWNLOAD_SOURCE = ["origin", "content", "cdn", "mock"] as const;
+export type DownloadSource = (typeof DOWNLOAD_SOURCE)[number];
+
 /** `ai_models.quota_type`：0 按量 / 1 按次 */
 export const QUOTA_TYPE = [0, 1] as const;
 export type QuotaType = (typeof QUOTA_TYPE)[number];

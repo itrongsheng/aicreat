@@ -1,6 +1,7 @@
 <script setup lang="ts">
 // 系统配置（docs/04 §6.6、§7.18）：按配置键分 Tab。system_info 按语言分别维护表单；
-// 其它 8 个键以 JsonEditor 编辑，保存 PUT /admin/settings/{key}，后端校验错误逐项展示（后续阶段可替换为专用表单）。
+// ai_routing_config 默认使用专用表单 AiRoutingForm.vue（docs/08 §4.2，可切换为 JSON）；
+// 其它键以 JsonEditor 编辑，保存 PUT /admin/settings/{key}，后端校验错误逐项展示（后续阶段可替换为专用表单）。
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useI18n } from "vue-i18n";
@@ -11,6 +12,7 @@ import { validationErrors } from "@/api/client";
 import * as settingsApi from "@/api/settings";
 import JsonEditor from "@/components/JsonEditor.vue";
 import { usePermission } from "@/composables/usePermission";
+import AiRoutingForm from "./AiRoutingForm.vue";
 
 type JsonKey = Exclude<settingsApi.SettingKey, "system_info">;
 type JsonValue = Record<string, unknown>;
@@ -62,7 +64,16 @@ const editors = ref<Partial<Record<JsonKey, InstanceType<typeof JsonEditor>>>>({
 
 function setEditorRef(key: JsonKey, el: unknown) {
   if (el) editors.value[key] = el as InstanceType<typeof JsonEditor>;
+  else delete editors.value[key]; // 卸载（如 AI 路由切换到表单模式）时移除，避免校验已卸载的编辑器
 }
+
+/** ai_routing_config 的编辑方式：专用表单（默认）或 JSON */
+const aiRoutingMode = ref<"form" | "json">("form");
+const usesForm = (key: JsonKey) => key === "ai_routing_config" && aiRoutingMode.value === "form";
+// 表单只产出合法对象：从 JSON 模式（可能停在非法文本）切回表单时恢复可保存状态
+watch(aiRoutingMode, (mode) => {
+  if (mode === "form") states.ai_routing_config.valid = true;
+});
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -139,7 +150,8 @@ async function reloadKey(key: JsonKey) {
 
 async function saveKey(key: JsonKey) {
   const state = states[key];
-  if (!editors.value[key]?.validate() || !state.valid) return;
+  if (usesForm(key)) state.valid = true;
+  else if (!editors.value[key]?.validate() || !state.valid) return;
   state.saving = true;
   state.errors = [];
   try {
@@ -272,9 +284,15 @@ onMounted(loadAll);
       <el-tab-pane v-for="key in JSON_KEYS" :key="key" :name="key" :label="t(`settings.tabs.${key}`)" lazy>
         <div class="settings-pane">
           <el-alert v-if="key === 'ai_routing_config'" type="info" :closable="false" show-icon :title="t('settings.aiRoutingHint')" class="settings-alert" />
+          <div v-if="key === 'ai_routing_config'" class="settings-mode">
+            <el-radio-group v-model="aiRoutingMode" size="small">
+              <el-radio-button value="form">{{ t("aiRouting.formMode") }}</el-radio-button>
+              <el-radio-button value="json">{{ t("aiRouting.jsonMode") }}</el-radio-button>
+            </el-radio-group>
+          </div>
           <p class="settings-hint">
             <span class="mono">{{ key }}</span>
-            · {{ t("settings.jsonHint") }}
+            <template v-if="!usesForm(key)"> · {{ t("settings.jsonHint") }}</template>
           </p>
 
           <div v-if="envEntries[key].length" class="settings-env">
@@ -300,7 +318,9 @@ onMounted(loadAll);
             </el-table>
           </div>
 
+          <AiRoutingForm v-if="usesForm(key)" v-model="states[key].value" :readonly="!canUpdate" :errors="states[key].errors" />
           <JsonEditor
+            v-else
             :ref="(el: unknown) => setEditorRef(key, el)"
             v-model="states[key].value"
             object-only
@@ -362,6 +382,9 @@ onMounted(loadAll);
 }
 .settings-alert {
   margin-bottom: 12px;
+}
+.settings-mode {
+  margin-bottom: 8px;
 }
 .settings-hint {
   margin: 0 0 12px;

@@ -131,9 +131,13 @@ def world(db: Session, users: UserFactory, super_admin: User) -> World:
                                         user_prompt="x", status="draft", created_by=a.id, updated_by=a.id))
     w.ids["prompt_templates"]["global"] = [pub.id, arch.id]
     w.ids["prompt_templates"]["A"].append(draft_a.id)
-    # 全局路由
-    glob = _add(db, m.CapabilityRoute(capability="content", project_id=0, protocol="openai_chat", primary_model="mock-text"))
-    w.ids["capability_routes"]["global"] = [glob.id]
+    # 全局路由：ensure_default_routes 幂等 seed 8 条全局行（启用应用 lifespan 的用例中已存在）
+    from app.services.ai_gateway_service import ensure_default_routes
+
+    ensure_default_routes(db)
+    w.ids["capability_routes"]["global"] = list(
+        db.scalars(select(m.CapabilityRoute.id).where(m.CapabilityRoute.project_id == 0)).all()
+    )
     db.commit()
     return w
 

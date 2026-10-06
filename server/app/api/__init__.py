@@ -11,6 +11,10 @@ from app.api.admin import (
     admin_groups,
     admin_permissions,
     admins,
+    ai_models,
+    ai_routes,
+    ai_tasks,
+    ai_usage,
     operation_logs,
     projects,
     settings,
@@ -28,4 +32,9 @@ admin.include_router(admin_permissions.router, prefix="/admin-permissions", tags
 admin.include_router(operation_logs.router, prefix="/admin-operation-logs", tags=["admin-rbac"])
 admin.include_router(settings.router, prefix="/settings", tags=["system"])
 admin.include_router(projects.router, prefix="/projects", tags=["content"])
+# AI 网关：/ai/models、/ai/tasks、/ai/usage 先于 /ai（ai_routes 的 /routes…、/health…）挂载
+admin.include_router(ai_models.router, prefix="/ai/models", tags=["ai"])
+admin.include_router(ai_tasks.router, prefix="/ai/tasks", tags=["ai"])
+admin.include_router(ai_usage.router, prefix="/ai/usage", tags=["ai"])
+admin.include_router(ai_routes.router, prefix="/ai", tags=["ai"])
 api_router.include_router(admin)
