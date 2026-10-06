@@ -1,0 +1,14 @@
+.env
+server/.env
+server/.venv/
+server/storage/
+backups/
+secrets/
+node_modules/
+apps/admin/dist/
+packages/shared/dist/
+__pycache__/
+.pytest_cache/
+*.pyc
+*.egg-info/
+.DS_Store
