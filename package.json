@@ -1,0 +1,20 @@
+{
+  "name": "aicreat",
+  "version": "0.1.0",
+  "private": true,
+  "description": "aicreat 内容生成平台 monorepo（server / apps/admin / packages/shared）",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "dev:server": "cd server && .venv\\Scripts\\python.exe -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8100",
+    "dev:worker": "cd server && .venv\\Scripts\\python.exe -m app.worker",
+    "dev:monitor": "cd server && .venv\\Scripts\\python.exe -m app.monitor_worker",
+    "dev:admin": "pnpm --filter admin dev",
+    "dev:restart": "powershell -ExecutionPolicy Bypass -File scripts/dev-restart.ps1",
+    "build:admin": "pnpm --filter admin build",
+    "build:shared": "pnpm --filter @aicreat/shared build",
+    "build": "pnpm -r build",
+    "smoke:api": "cd server && .venv\\Scripts\\python.exe scripts\\integration_smoke.py"
+  }
+}
