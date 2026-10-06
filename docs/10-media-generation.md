@@ -354,7 +354,7 @@ stateDiagram-v2
 - `POST /admin/media/assets/{id}/transfer`（`media.assets.retry`，`failed(transfer_failed/timeout)` 且 `upstream_url` 非空）→ `downloading`，`transfer_attempts` 清零、`failed_at` 清空、`next_transfer_at=now`，由 worker `transfer_media.retry_due` 在 60s 内领取转存（API 进程不下载）；不新建根任务、`ai_task_id` 不变。
 - `POST /admin/ai/tasks/{id}/retry` 对媒体根任务返回 409 `data={"hint":"POST /admin/media/assets/{asset_id}/retry"}`。
 
-告警：`media_task_failed`（severity `info`，`target_type=media_asset`，`target_key={asset_id}`，`payload` 含 `error_category`、`request_id`（提交尝试行）、`model`、`upstream_task_id`；`transfer_failed` 时另含 `download_request_id`，§4.8 第 6 步），同一资产重复失败只累加 `trigger_count`；`error_category=cancelled` 不触发。其它告警（模型级 `ai_breaker_open`、`ai_task_failures`、`ai_upstream_unavailable`，系统级 `ai_quota_exceeded`、`ai_auth_failed`）定义见 [11-link-backfill-and-monitoring](./11-link-backfill-and-monitoring.md)。
+告警：`media_task_failed`（severity `info`，`target_type=media_asset`，`target_key={asset_id}`，`project_id` = 资产的 `project_id`（决定告警对哪位用户可见，[13-user-data-scope](./13-user-data-scope.md) §11），`payload` 含 `error_category`、`request_id`（提交尝试行）、`model`、`upstream_task_id`；`transfer_failed` 时另含 `download_request_id`，§4.8 第 6 步），同一资产重复失败只累加 `trigger_count`；`error_category=cancelled` 不触发。其它告警（模型级 `ai_breaker_open`、`ai_task_failures`、`ai_upstream_unavailable`，系统级 `ai_quota_exceeded`、`ai_auth_failed`）定义见 [11-link-backfill-and-monitoring](./11-link-backfill-and-monitoring.md)。
 
 ### 4.11 成本
 
@@ -569,6 +569,7 @@ flowchart TD
 - 列表 `GET /admin/media/assets`（`media.assets.view`）：筛选 `project_id`/`content_id`/`kind`/`status`/`usage_type`/`source`/`created_by`，按 `created_at DESC`，`page_size` 默认 20、最大 100；走索引 `INDEX(project_id, kind, status, created_at)`。
 - 详情 `GET /admin/media/assets/{id}`：`AssetOut` 含 `params`、`reference_asset_ids`、根任务摘要 `task`（结构同 `/task` 接口）与引用信息 `references{cover_of,bound_content_id,referenced_by_asset_ids[{id,status}],count}`（仅详情实时计算，列表不含，§6.3）。
 - 后台默认按全局项目选择器（`store/project.ts`）过滤，可切换「全部项目」查看独立素材（`project_id` 为空）。
+- 数据范围（[13-user-data-scope](./13-user-data-scope.md) §4.2）：有 `project_id` 的素材随项目负责人可见；`project_id` 为空的上传素材按上传人 `created_by` 归属，只对上传人与总后台可见（`INDEX(created_by, created_at)`）；普通用户的列表、详情、重试、转存、删除只作用于这两类可见素材，其它素材按不存在返回 404。生成接口的 `project_id` / `content_id` 必须可见。
 
 ### 6.2 标签与分类
 
@@ -619,7 +620,7 @@ flowchart TD
 | `POST /admin/uploads/image` | `system.upload.create` | multipart `file`；扩展名 jpg/png/webp/gif，魔数 `storage.sniff_media_type` 须一致；≤ `MAX_IMAGE_SIZE_MB`（10）；Nginx `client_max_body_size` 兜底 | `media_assets(kind=image, source=uploaded, usage_type=reference, status=ready, ready_at=now, project_id=NULL, width/height=probe_image_size, file_hash, mime_type, size_bytes, storage_key=media/uploads/{yyyy}/{mm}/{uuid}.{ext}, thumbnail_key=storage_key)` |
 | `POST /admin/uploads/video` | `system.upload.create` | mp4/mov（均为 `ftyp` 容器）；≤ `MAX_VIDEO_SIZE_MB`（200） | 同上 `kind=video`，`thumbnail_key=NULL` |
 
-响应 `{asset_id,url,public}`：`public` 在真实模式下 = `normalize_public_url(url)` + `assert_public_url(url)` 是否全部通过（§11.1 规则：`PUBLIC_BASE_URL`/`OSS_PUBLIC_BASE_URL` 使用 80/443/缺省端口、`DEV_MODE=false` 时为 `https`、主机解析为公网地址），为 `false` 时前端警告「真实模式下 zhiqiapi 无法读取该地址」；Mock 模式恒为 `true`（放行本地地址）。上传素材可在 `ImageUpload.vue` 直接作为 `reference_image_urls`/`input_reference`/`first_frame_image_url`/`last_frame_image_url`/`reference_video_urls` 使用；音频不支持上传。上传接口只接收 multipart `file`（[04-api-spec](./04-api-spec.md) §6.14，无 `project_id` 表单字段），上传素材一律 `project_id=NULL`（独立素材）：参考素材选择器按 `usage_type=reference&status=ready` 查询、不带 `project_id`（§7.4），被 attach 到内容时按 §4.9 写入内容的项目。上传不做 `file_hash` 去重（同文件多次上传产生多条 `reference` 行，由孤儿清理回收）。
+响应 `{asset_id,url,public}`：`public` 在真实模式下 = `normalize_public_url(url)` + `assert_public_url(url)` 是否全部通过（§11.1 规则：`PUBLIC_BASE_URL`/`OSS_PUBLIC_BASE_URL` 使用 80/443/缺省端口、`DEV_MODE=false` 时为 `https`、主机解析为公网地址），为 `false` 时前端警告「真实模式下 zhiqiapi 无法读取该地址」；Mock 模式恒为 `true`（放行本地地址）。上传素材可在 `ImageUpload.vue` 直接作为 `reference_image_urls`/`input_reference`/`first_frame_image_url`/`last_frame_image_url`/`reference_video_urls` 使用；音频不支持上传。上传接口只接收 multipart `file`（[04-api-spec](./04-api-spec.md) §6.14，无 `project_id` 表单字段），上传素材一律 `project_id=NULL`（独立素材）：参考素材选择器按 `usage_type=reference&status=ready` 查询、不带 `project_id`（§7.4），被 attach 到内容时按 §4.9 写入内容的项目。上传不做 `file_hash` 去重（同文件多次上传产生多条 `reference` 行，由孤儿清理回收）。上传素材绑定到内容前只对上传人与总后台可见，因此普通用户在参考素材选择器里只看到自己上传的素材（[13-user-data-scope](./13-user-data-scope.md) §7.4）。
 
 ## 7. 后台页面
 

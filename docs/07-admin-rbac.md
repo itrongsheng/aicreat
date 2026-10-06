@@ -2,22 +2,25 @@
 
 ## 1. 目标与范围
 
-aicreat 只有一个前端（管理后台 `apps/admin`），全部业务接口都挂在 `/api/v1/admin/*` 之下，因此管理员 RBAC（Role-Based Access Control）是整个平台唯一的准入边界：关键词/标题/内容生成、媒体生成、回填链接、监控、报表、系统配置，没有一个接口可以绕过它。本期目标：
+aicreat 只有一个前端（管理后台 `apps/admin`），全部业务接口都挂在 `/api/v1/admin/*` 之下，因此管理员 RBAC（Role-Based Access Control）是整个平台的功能准入边界：关键词/标题/内容生成、媒体生成、回填链接、监控、报表、系统配置，没有一个接口可以绕过它；在功能权限之上，用户组的数据范围 `data_scope` 再决定一个用户能看到哪些数据（[13-user-data-scope](./13-user-data-scope.md)）。本期目标：
 
 - 超级管理员可新增、编辑、启用、禁用管理员，并重置管理员密码；管理员账号不做物理删除。
 - 一个管理员只属于一个「管理员用户组」；用户组按「菜单查看权限（`menu`）+ 操作权限（`action`）」两级配置。
 - 除 `/admin/auth/*` 的登录态接口（`me`/`logout`/`change-password`，仅 `get_current_admin`）与 `GET /admin/settings/runtime`（已登录即可读）外，后端每个写接口与读接口都通过 `require_permission("module.resource.action")` 校验；前端菜单、路由与按钮同步隐藏，但只作为交互体验。
 - 管理员、用户组、权限分配与所有后台写操作统一写入 `admin_operation_logs`，可按管理员、模块、动作、目标、时间追溯。
 - 令牌携带 `token_version`：登出、本人修改密码、重置他人密码、启用/禁用、更换用户组时递增，旧令牌立即失效（事件全表见 §7.4）。
+- 用户系统：每个用户组除权限码外还带**数据范围** `data_scope`（`all` 全部数据 / `own` 仅本人负责的项目）。功能权限（本文）与数据范围（[13-user-data-scope](./13-user-data-scope.md)）同时满足才能访问：`own` 范围的普通用户只能看到自己负责的项目及其下数据，`all` 范围即「总后台」，看全部用户的数据。
+
+术语：本文与代码中的「管理员」（`admins` 表、`get_current_admin`、管理员 JWT、`/admin/admins`）即用户系统中的**用户账号**，界面统一显示为「用户」（菜单「用户管理」）；代码标识符、表名、接口路径与权限码保持不变。
 
 BRIEF 中的四类角色与系统内置用户组一一对应：
 
-| BRIEF 角色 | 系统用户组 `admin_groups.code` | 中文名 | 定位 |
-| --- | --- | --- | --- |
-| 超级管理员 | `super_admin` | 超级管理员 | 全部权限，不可删除/停用 |
-| 运营人员 | `operator` | 运营人员 | 生成、编辑、回填、监控处理 |
-| 审核人员 | `reviewer` | 审核人员 | 审核内容，查看生产数据 |
-| 只读 | `read_only` | 只读 | 仅查看并导出报表与非敏感数据 |
+| BRIEF 角色 | 系统用户组 `admin_groups.code` | 中文名 | 定位 | 默认数据范围 |
+| --- | --- | --- | --- | --- |
+| 超级管理员 | `super_admin` | 超级管理员 | 全部权限，不可删除/停用 | `all`（固定） |
+| 运营人员 | `operator` | 运营人员 | 生成、编辑、回填、监控处理 | `own` |
+| 审核人员 | `reviewer` | 审核人员 | 审核内容，查看生产数据 | `all` |
+| 只读 | `read_only` | 只读 | 仅查看并导出报表与非敏感数据 | `all` |
 
 本文档负责：RBAC 数据模型（字段级摘录）、**权限码全表**、系统用户组默认权限、`require_permission`/`token_version` 实现、审计中间件、管理端 RBAC 页面与前端权限控制。不在本文档范围、只做引用的内容：
 
@@ -28,8 +31,9 @@ BRIEF 中的四类角色与系统内置用户组一一对应：
 | `ADMIN_JWT_SECRET` 等环境变量、部署 | [05-deployment](./05-deployment.md) |
 | 目录树、页面与组件清单 | [02-project-structure](./02-project-structure.md) |
 | 系统配置页（`settings` 表、密钥脱敏规则） | [04-api-spec](./04-api-spec.md)、[08-zhiqiapi-integration](./08-zhiqiapi-integration.md) |
+| 数据范围语义、数据归属与可见性、`get_data_scope`、项目负责人规则 | [13-user-data-scope](./13-user-data-scope.md) |
 
-本期「用户组」仅指后台管理员用户组；平台没有 C 端用户，不存在会员分组。
+「用户组」即后台账号的用户组，同时决定功能权限与数据范围；平台没有 C 端用户，不存在会员分组，账号只由总后台创建（无自助注册）。
 
 ## 2. 权限模型
 
@@ -61,6 +65,7 @@ erDiagram
 | 权限码 | `module.resource.action` 字符串，如 `content.keywords.generate`；`type=menu` 的码固定为 `*.view` |
 | 系统用户组 | `admin_groups.is_system=1`，`code` 固定为 `super_admin`/`operator`/`reviewer`/`read_only`，不可删除、不可停用 |
 | 自定义用户组 | 后台创建，`code` 由服务端生成 `custom_{uuid4().hex[:12]}`，创建后不可修改 |
+| 数据范围 | `admin_groups.data_scope`：`all`（全部数据，总后台）/ `own`（仅本人负责的项目及其下数据）；与权限码正交，语义与可见性规则见 [13-user-data-scope](./13-user-data-scope.md) |
 | `token_version` | `admins.token_version`，JWT claim `ver` 必须与之相等；递增即令所有旧令牌失效 |
 | 审计 | `admin_operation_logs`：写接口成功后由 `main.py` 审计中间件自动记录，登录/登出等由处理函数自行记录 |
 
@@ -95,6 +100,7 @@ RBAC 五张表的权威 DDL 在 [03-data-model](./03-data-model.md)；本模块�
 | description | VARCHAR(255) | 说明，可空 |
 | is_system | TINYINT 默认 0 | 系统内置组不可删除/停用 |
 | is_active | TINYINT 默认 1 | 是否可用 |
+| data_scope | VARCHAR(16) 默认 `own` | `all`/`own`；系统组默认值见 §5.1，`super_admin` 固定 `all`；自定义组创建时缺省 `own` |
 | created_by | BIGINT | 创建人，可空 |
 
 索引：`UNIQUE(code)`、`UNIQUE(name)`。
@@ -144,15 +150,15 @@ RBAC 五张表的权威 DDL 在 [03-data-model](./03-data-model.md)；本模块�
 | 步骤 | 位置 | 内容 |
 | --- | --- | --- |
 | 建表 | `server/migrations/versions/0001_initial.py` | 全部 24 张表，含 RBAC 五表与真实外键 |
-| 权限与系统组 | `server/migrations/versions/0002_seed_permissions.py` | 写入 `PERMISSIONS` 全部权限码、4 个 `SYSTEM_GROUPS`、各系统组的默认权限关联（`super_admin` 写入全集） |
+| 权限与系统组 | `server/migrations/versions/0002_seed_permissions.py` | 写入 `PERMISSIONS` 全部权限码、4 个 `SYSTEM_GROUPS`（含各组默认 `data_scope`）、各系统组的默认权限关联（`super_admin` 写入全集） |
 | 默认超管 | `server/seeds/seed.py` | 幂等 upsert `SEED_ADMIN_USERNAME`/`SEED_ADMIN_PASSWORD`（默认 `admin`/`admin123`）到 `super_admin` 组（`created_by=NULL`、`token_version=1`）；账号已存在时**不覆盖**密码、不改组、不改状态。同一脚本还 upsert 示例项目、系统 Prompt 模板与默认平台（见 [06-getting-started](./06-getting-started.md)），与本模块无关 |
 | 启动自愈 | `main.py`、`worker.py`、`monitor_worker.py` 启动时在 `lock:bootstrap`（TTL 60s，等待最多 30s）内调用 `admin_rbac_service.ensure_rbac_seed(db)`（同一锁内随后执行 `settings_service.ensure_default_settings` 与 `ai_gateway_service.ensure_default_routes`，与本模块无关） | 补齐新增权限码、缺失的系统组、`super_admin` 缺失的权限行；全部幂等（`INSERT … ON DUPLICATE KEY UPDATE id=id` 或逐条 `IntegrityError` 回滚） |
 
 `ensure_rbac_seed` 算法：
 
 1. 遍历 `PERMISSIONS`：按 `code` upsert `admin_permissions`（已存在则更新 `module/name/type/parent_code/sort`）；数据库中多余的旧码不删除（留给迁移），但权限树与保存校验只认 `PERMISSION_CODES`。
-2. 遍历 `SYSTEM_GROUPS`：不存在则插入（`is_active=1`）；组为新建**或当前没有任何权限关联行**时写入 `DEFAULT_GROUP_PERMISSIONS[code]`；`super_admin` 每次都补齐 `PERMISSION_CODES` 中缺失的关联行。
-3. 已有权限关联的 `operator`/`reviewer`/`read_only` 组**不**重写权限（管理员的手工调整优先）。
+2. 遍历 `SYSTEM_GROUPS`：不存在则插入（`is_active=1`，`data_scope` 取 `SYSTEM_GROUPS` 中的默认值）；组为新建**或当前没有任何权限关联行**时写入 `DEFAULT_GROUP_PERMISSIONS[code]`；`super_admin` 每次都补齐 `PERMISSION_CODES` 中缺失的关联行，并把 `data_scope` 写回 `all`。
+3. 已有权限关联的 `operator`/`reviewer`/`read_only` 组**不**重写权限，也不改写 `data_scope`（管理员的手工调整优先）。
 4. 不创建管理员账号（由 `seeds/seed.py` 负责）。
 
 ## 4. 权限清单
@@ -194,7 +200,7 @@ RBAC 五张表的权威 DDL 在 [03-data-model](./03-data-model.md)；本模块�
 | stats | reports | 报表 | `stats.reports.view/export/recompute` |
 | system | settings | 系统配置 | `system.settings.view/update` |
 | system | upload | 素材上传 | `system.upload.view/create` |
-| security | admins | 管理员管理 | `security.admins.view/create/update/status/reset_password` |
+| security | admins | 用户管理 | `security.admins.view/create/update/status/reset_password` |
 | security | groups | 用户组权限 | `security.groups.view/create/update/delete/assign` |
 | security | audit | 操作日志 | `security.audit.view` |
 
@@ -237,7 +243,7 @@ PERMISSION_DEPENDENCIES: dict[str, set[str]] = {
 | AI 网关 | 模型目录 → `ai/Models.vue`；能力路由 → `ai/Routes.vue`；AI 任务 → `ai/Tasks.vue`；用量对账 → `ai/Usage.vue` | `ai.models.view`；`ai.routes.view`；`ai.tasks.view`；`ai.usage.view` |
 | 发布与监控 | 发布平台 → `platforms/Index.vue`；回填链接 → `links/Index.vue`；删除检测 → `monitoring/LinkChecks.vue`；收录检测 → `monitoring/IndexChecks.vue`；告警中心 → `alerts/Index.vue` | `publish.platforms.view`；`publish.links.view`；`monitoring.link_checks.view`；`monitoring.index_checks.view`；`monitoring.alerts.view` |
 | 报表 | 报表 → `stats/Reports.vue` | `stats.reports.view` |
-| 系统 | 系统配置 → `settings/Index.vue`；管理员 → `admins/Index.vue`；用户组 → `admin-groups/Index.vue`；操作日志 → `admin-operation-logs/Index.vue` | `system.settings.view`；`security.admins.view`；`security.groups.view`；`security.audit.view` |
+| 系统 | 系统配置 → `settings/Index.vue`；用户管理 → `admins/Index.vue`；用户组 → `admin-groups/Index.vue`；操作日志 → `admin-operation-logs/Index.vue` | `system.settings.view`；`security.admins.view`；`security.groups.view`；`security.audit.view` |
 
 ### 4.5 `PERMISSIONS` 定义（最终值）
 
@@ -265,7 +271,7 @@ PERMISSIONS: list[PermissionSpec] = [
     *_resource("stats", "reports", "报表", [("export", "导出报表"), ("recompute", "重算统计")], 700),
     *_resource("system", "settings", "系统配置", [("update", "修改系统配置")], 800),
     *_resource("system", "upload", "素材上传", [("create", "上传参考素材")], 810),
-    *_resource("security", "admins", "管理员管理", [("create", "新增管理员"), ("update", "编辑管理员"), ("status", "启用或禁用管理员"), ("reset_password", "重置管理员密码")], 900),
+    *_resource("security", "admins", "用户管理", [("create", "新增用户"), ("update", "编辑用户"), ("status", "启用或禁用用户"), ("reset_password", "重置用户密码")], 900),
     *_resource("security", "groups", "用户组权限", [("create", "新增用户组"), ("update", "编辑用户组"), ("delete", "删除用户组"), ("assign", "分配用户组权限")], 910),
     PermissionSpec("security.audit.view", "security", "操作日志", "menu", None, 920),
 ]
@@ -277,12 +283,14 @@ PERMISSIONS: list[PermissionSpec] = [
 
 ```python
 SYSTEM_GROUPS = [
-    {"code": "super_admin", "name": "超级管理员", "name_en": "Super Administrator", "description": "拥有全部后台权限", "is_system": 1},
-    {"code": "operator", "name": "运营人员", "name_en": "Operator", "description": "生成、编辑、回填与监控处理", "is_system": 1},
-    {"code": "reviewer", "name": "审核人员", "name_en": "Reviewer", "description": "审核内容并查看生产数据", "is_system": 1},
-    {"code": "read_only", "name": "只读", "name_en": "Read Only", "description": "仅查看并导出报表与非敏感数据", "is_system": 1},
+    {"code": "super_admin", "name": "超级管理员", "name_en": "Super Administrator", "description": "拥有全部后台权限", "is_system": 1, "data_scope": "all"},
+    {"code": "operator", "name": "运营人员", "name_en": "Operator", "description": "生成、编辑、回填与监控处理", "is_system": 1, "data_scope": "own"},
+    {"code": "reviewer", "name": "审核人员", "name_en": "Reviewer", "description": "审核内容并查看生产数据", "is_system": 1, "data_scope": "all"},
+    {"code": "read_only", "name": "只读", "name_en": "Read Only", "description": "仅查看并导出报表与非敏感数据", "is_system": 1, "data_scope": "all"},
 ]
 ```
+
+`data_scope` 为各系统组的**默认**数据范围：`super_admin` 固定为 `all`（修改返回 403，启动时自愈）；`operator`/`reviewer`/`read_only` 可在用户组页修改，修改后 `ensure_rbac_seed` 不再覆盖。取值理由见 [13-user-data-scope](./13-user-data-scope.md) §3.2。
 
 ### 5.2 默认权限（`DEFAULT_GROUP_PERMISSIONS`，最终值）
 
@@ -331,11 +339,13 @@ DEFAULT_GROUP_PERMISSIONS = {
 | `reviewer` | 控制台；内容生产各页查看；审核、编辑、导出内容；媒体/发布/监控各页查看；报表查看 | 任何生成、回填、检测触发、告警处理、导出报表；AI 网关各页（无 `ai.*`）；参考素材上传；系统与安全模块 |
 | `read_only` | 除 `security.*` 与 `system.settings.view` 外的全部 `*.view`（含 `system.upload.view`，但无 `create`）；`stats.reports.export`；列表 CSV 导出（沿用 `view`） | 任何写操作、内容全文导出、系统配置、安全模块 |
 
+上表只描述**功能权限**；能看到哪些数据由所属组的 `data_scope` 决定（§5.1）：`operator` 默认 `own`，上表中的一切操作都只作用于本人负责的项目及其下数据；`super_admin`/`reviewer`/`read_only` 默认 `all`，作用于全部用户的数据。安全模块与全局配置（`security.*`、`system.settings.*`、`ai.models.sync`、`ai.routes` 的写与探测、`ai.usage.reconcile`、`publish.platforms` 的写与测试、`stats.reports.recompute`）不受数据范围约束（[13-user-data-scope](./13-user-data-scope.md) §4.3），只应授予 `all` 范围的组。
+
 ### 5.3 自定义用户组
 
-- 由 `security.groups.create` 创建，`code=custom_{uuid4().hex[:12]}`、`is_system=0`；初始无任何权限，需随后 `PUT /admin/admin-groups/{id}/permissions` 分配。
+- 由 `security.groups.create` 创建，`code=custom_{uuid4().hex[:12]}`、`is_system=0`、`data_scope` 缺省 `own`（创建时可传 `all`）；初始无任何权限，需随后 `PUT /admin/admin-groups/{id}/permissions` 分配。
 - 自定义组可停用（须无启用中的管理员）、可删除（须无任何管理员）。
-- 推荐的组合示例：「媒体设计」= `dashboard.view` + `media.*` + `system.upload.*` + `content.contents.view`；「SEO 专员」= `dashboard.view` + `publish.*` + `monitoring.*` + `stats.reports.view/export`。
+- 推荐的组合示例：「媒体设计」= `dashboard.view` + `media.*` + `system.upload.*` + `content.contents.view`；「SEO 专员」= `dashboard.view` + `publish.*` + `monitoring.*` + `stats.reports.view/export`。二者服务于全部用户时设为 `all`，只服务本人项目时保持 `own`。
 
 ## 6. 后端接口设计
 
@@ -345,7 +355,7 @@ DEFAULT_GROUP_PERMISSIONS = {
 | --- | --- | --- |
 | `auth.py` | `/auth` | `auth.py`：`LoginBody`、`ChangePasswordBody`、`MeOut` |
 | `admins.py` | `/admins` | `admin_rbac.py`：`AdminCreate`、`AdminUpdate`、`AdminStatusBody`、`AdminResetPasswordBody` |
-| `admin_groups.py` | `/admin-groups` | `admin_rbac.py`：`GroupCreate`、`GroupUpdate`、`PermissionCodesBody` |
+| `admin_groups.py` | `/admin-groups` | `admin_rbac.py`：`GroupCreate`、`GroupUpdate`（均含 `data_scope`）、`PermissionCodesBody` |
 | `admin_permissions.py` | `/admin-permissions` | — |
 | `operation_logs.py` | `/admin-operation-logs` | 查询参数直接声明在路由函数上 |
 
@@ -353,8 +363,8 @@ DEFAULT_GROUP_PERMISSIONS = {
 
 | 方法 | 路径 | 权限码 | 说明 |
 | --- | --- | --- | --- |
-| POST | `/admin/auth/login` | 公开 | `{username,password}` → `{token,expires_in,admin{id,username,display_name,group{id,code,name},permissions[]}}`；失败 5 次/15 分钟锁定（Redis `rate:admin_login:{username}`） |
-| GET | `/admin/auth/me` | 已登录 | 当前管理员 + 最新权限码 + `zhiqi_mode`（`mock`/`live`） |
+| POST | `/admin/auth/login` | 公开 | `{username,password}` → `{token,expires_in,admin{id,username,display_name,group{id,code,name},permissions[],data_scope}}`；失败 5 次/15 分钟锁定（Redis `rate:admin_login:{username}`） |
+| GET | `/admin/auth/me` | 已登录 | 当前用户 + 最新权限码 + 数据范围 `data_scope`（`all`/`own`，取所属用户组）+ `zhiqi_mode`（`mock`/`live`） |
 | POST | `/admin/auth/logout` | 已登录 | `token_version += 1`，旧令牌失效 |
 | POST | `/admin/auth/change-password` | 已登录 | `{old_password,new_password}`，成功后 `token_version += 1` |
 | GET | `/admin/auth/site-info` | 公开 | `?locale=zh-CN` 或 `en-US`（缺省与非法值均回退 `zh-CN`，经 `services/i18n.normalize_locale`）→ `system_info`（站点名/Logo/页脚/联系方式），供 `Login.vue` 登录前渲染；仅返回该配置键 |
@@ -380,7 +390,8 @@ Content-Type: application/json
       "username": "admin",
       "display_name": "超级管理员",
       "group": {"id": 1, "code": "super_admin", "name": "超级管理员"},
-      "permissions": ["dashboard.view", "content.projects.view", "content.projects.create", "..."]
+      "permissions": ["dashboard.view", "content.projects.view", "content.projects.create", "..."],
+      "data_scope": "all"
     }
   }
 }
@@ -389,16 +400,16 @@ Content-Type: application/json
 `GET /admin/auth/me` 返回同样的 `admin` 对象并增加 `last_login_at` 与 `zhiqi_mode`：
 
 ```json
-{"code": 0, "message": "ok", "data": {"id": 1, "username": "admin", "display_name": "超级管理员", "group": {"id": 1, "code": "super_admin", "name": "超级管理员"}, "permissions": ["dashboard.view", "..."], "last_login_at": "2026-10-06T01:00:00Z", "zhiqi_mode": "mock"}}
+{"code": 0, "message": "ok", "data": {"id": 1, "username": "admin", "display_name": "超级管理员", "group": {"id": 1, "code": "super_admin", "name": "超级管理员"}, "permissions": ["dashboard.view", "..."], "data_scope": "all", "last_login_at": "2026-10-06T01:00:00Z", "zhiqi_mode": "mock"}}
 ```
 
 `POST /admin/auth/change-password`：原密码错误 → 400「原密码错误」；新密码不满足策略或与原密码相同 → 400；成功后 `token_version += 1`，返回 `ok(message="密码已修改，请重新登录")`，前端清除登录态并跳转登录页。`GET /admin/auth/site-info?locale=zh-CN` 返回 `{"site_name": "aicreat 内容生成平台", "logo_url": "", "footer": "", "support_contact": ""}`。
 
-### 6.2 管理员管理（`/admin/admins`）
+### 6.2 用户管理（`/admin/admins`）
 
 | 方法 | 路径 | 权限码 | 说明 |
 | --- | --- | --- | --- |
-| GET | `/admin/admins` | `security.admins.view` | 分页；`keyword`（匹配 `username`/`display_name`）/`group_id`/`is_active`；按 `id` 倒序 |
+| GET | `/admin/admins` | `security.admins.view` | 分页；`keyword`（匹配 `username`/`display_name`）/`group_id`/`is_active`；按 `id` 倒序；每项附所属组的 `data_scope` |
 | POST | `/admin/admins` | `security.admins.create` | `{username,display_name,password,group_id,is_active}`（`is_active` 缺省 `true`） |
 | GET | `/admin/admins/{id}` | `security.admins.view` | 详情（含 `permissions[]`、`created_by`） |
 | PUT | `/admin/admins/{id}` | `security.admins.update` | `{display_name,group_id}`（两者均可选，至少一个）；换组时 `token_version += 1`；不能修改自己的用户组；目标是最后一个有效超管（`super_admin` 组内 `is_active=1` 的唯一管理员）时不能把它移出 `super_admin` 组（403）；目标组必须存在且 `is_active=1`（否则 400） |
@@ -419,7 +430,7 @@ Content-Type: application/json
 {
   "code": 0,
   "message": "ok",
-  "data": {"id": 5, "username": "operator01", "display_name": "运营小王", "group": {"id": 2, "code": "operator", "name": "运营人员"}, "is_active": true, "last_login_at": null, "created_by": 1, "created_at": "2026-10-06T08:00:00Z"}
+  "data": {"id": 5, "username": "operator01", "display_name": "运营小王", "group": {"id": 2, "code": "operator", "name": "运营人员"}, "data_scope": "own", "is_active": true, "last_login_at": null, "created_by": 1, "created_at": "2026-10-06T08:00:00Z"}
 }
 ```
 
@@ -429,10 +440,10 @@ Content-Type: application/json
 
 | 方法 | 路径 | 权限码 | 说明 |
 | --- | --- | --- | --- |
-| GET | `/admin/admin-groups` | `security.groups.view` | **不分页**（与 [04-api-spec](./04-api-spec.md) 一致，`data` 为数组；用户组数量很小且前端下拉需要全量）；每组含 `admin_count`；系统组在前、`id` 升序；可选 `is_active` 筛选 |
-| POST | `/admin/admin-groups` | `security.groups.create` | `{name,description,is_active}`（`name` 1~50 字符、全局唯一，重复 409 `existing_id`；`description` ≤ 255 字符可空）；`code` 由服务端生成 `custom_{uuid4().hex[:12]}`（创建后不可修改），`name_en` 由 `name` 自动生成 |
+| GET | `/admin/admin-groups` | `security.groups.view` | **不分页**（与 [04-api-spec](./04-api-spec.md) 一致，`data` 为数组；用户组数量很小且前端下拉需要全量）；每组含 `admin_count` 与 `data_scope`；系统组在前、`id` 升序；可选 `is_active` 筛选 |
+| POST | `/admin/admin-groups` | `security.groups.create` | `{name,description,is_active,data_scope?}`（`name` 1~50 字符、全局唯一，重复 409 `existing_id`；`description` ≤ 255 字符可空；`data_scope` ∈ `all`/`own`，缺省 `own`）；`code` 由服务端生成 `custom_{uuid4().hex[:12]}`（创建后不可修改），`name_en` 由 `name` 自动生成 |
 | GET | `/admin/admin-groups/{id}` | `security.groups.view` | 详情 + `permission_codes[]` |
-| PUT | `/admin/admin-groups/{id}` | `security.groups.update` | `{name,description,is_active}`（均可选）改名称/说明/状态；`name` 重复 409 `existing_id`；系统组不可停用（403）；停用前组内不得有启用中的管理员（403）；`code`、`name_en` 不可修改 |
+| PUT | `/admin/admin-groups/{id}` | `security.groups.update` | `{name,description,is_active,data_scope}`（均可选）改名称/说明/状态/数据范围；`name` 重复 409 `existing_id`；系统组不可停用（403）；停用前组内不得有启用中的管理员（403）；`super_admin` 组的 `data_scope` 只能为 `all`（其它值 403）；`data_scope` 修改立即生效、不递增成员 `token_version`，审计 `summary` 记录前后值（[13-user-data-scope](./13-user-data-scope.md) §3.3）；`code`、`name_en` 不可修改 |
 | PUT | `/admin/admin-groups/{id}/permissions` | `security.groups.assign` | `{permission_codes[]}` 覆盖保存，自动补齐同资源 `view` 与 `PERMISSION_DEPENDENCIES`；`super_admin` 组拒绝修改；系统组补齐后不得为空 |
 | DELETE | `/admin/admin-groups/{id}` | `security.groups.delete` | 非系统且无管理员（含已禁用管理员，否则 403）；同一事务内先 `DELETE FROM admin_group_permissions WHERE group_id = :id` 再删除组行（关联表外键为 `ON DELETE RESTRICT`，不级联，见 [03-data-model](./03-data-model.md)） |
 | GET | `/admin/admin-permissions` | `security.groups.view` | 平铺权限列表 `[{code,module,name,type,parent_code,sort}]`（静态字典，按 `sort` 排序，不分页） |
@@ -440,7 +451,7 @@ Content-Type: application/json
 
 `name_en` 生成规则（`admin_rbac_service.generate_name_en`）：`name` 全为 ASCII 字母/数字/空格时取其 Title Case；否则取 `"Custom Group " + code[-6:]`。首版不开放编辑 `name_en`。
 
-用户组对象：`{id, code, name, name_en, description, is_system, is_active, admin_count, created_at}`，详情额外返回 `permission_codes[]`（`super_admin` 固定返回 `PERMISSION_CODES` 全集的排序结果）。保存权限：
+用户组对象：`{id, code, name, name_en, description, is_system, is_active, data_scope, admin_count, created_at}`，详情额外返回 `permission_codes[]`（`super_admin` 固定返回 `PERMISSION_CODES` 全集的排序结果）。保存权限：
 
 ```http
 PUT /api/v1/admin/admin-groups/5/permissions
@@ -456,7 +467,7 @@ Content-Type: application/json
   "message": "ok",
   "data": {
     "id": 5, "code": "custom_3f9a1c2b7d4e", "name": "媒体设计", "name_en": "Custom Group 2b7d4e", "description": null,
-    "is_system": false, "is_active": true, "admin_count": 0,
+    "is_system": false, "is_active": true, "data_scope": "own", "admin_count": 0,
     "permission_codes": ["content.batches.view", "content.keywords.generate", "content.keywords.view", "dashboard.view", "media.assets.view", "media.images.generate", "media.images.view"]
   }
 }
@@ -481,7 +492,7 @@ Content-Type: application/json
 
 | 方法 | 路径 | 权限码 | 说明 |
 | --- | --- | --- | --- |
-| GET | `/admin/admin-operation-logs` | `security.audit.view` | 分页；`admin_id`/`module`/`action`/`target_type`/`start`/`end`（ISO 8601 UTC，闭区间）；`module` 按 `permission_code LIKE '{module}.%'` 过滤（表无 `module` 列，复用 `INDEX(permission_code)`）；按 `id` 倒序 |
+| GET | `/admin/admin-operation-logs` | `security.audit.view` | 分页；`admin_id`/`module`/`action`/`target_type`/`start`/`end`（ISO 8601 UTC，闭区间）；`module` 按 `permission_code LIKE '{module}.%'` 过滤（表无 `module` 列，复用 `INDEX(permission_code)`）；按 `id` 倒序；调用者所属组 `data_scope=own` 时只返回本人的记录（`admin_id` 参数被忽略，[13-user-data-scope](./13-user-data-scope.md) §6.3） |
 
 ```json
 {"code": 0, "message": "ok", "data": {"items": [
@@ -499,7 +510,7 @@ Content-Type: application/json
 | --- | --- | --- |
 | 400 | 密码不满足策略、原密码错误、新旧密码相同、分配到不存在或已停用的用户组、无效权限码 | 统一为 [04-api-spec](./04-api-spec.md) §5.1 的校验错误列表 `[{"loc":[…],"msg":"…","type":"…","input":…}]`（Pydantic 字段校验沿用其原生 `loc`/`type`）：密码不满足策略 `loc=["body","password"]`（本人改密为 `["body","new_password"]`）、`type="value_error"`；原密码错误 `loc=["body","old_password"]`、`type="wrong_password"`；新旧密码相同 `loc=["body","new_password"]`、`type="same_as_old"`；用户组不存在或已停用 `loc=["body","group_id"]`、`type="group_unavailable"`、`input` 为该 ID；无效权限码每码一项、`type="unknown_permission"`（§4.3）。密码类字段（`password`/`old_password`/`new_password`）的错误项一律不带 `input`（Pydantic 错误在 `register_exception_handlers` 转换时剔除），避免回显密码（§10 第 6 条） |
 | 401 | 登录时用户名或密码错误；无令牌、令牌过期或签名错误、`ver` ≠ `token_version`、管理员不存在/已禁用、用户组已停用 | — |
-| 403 | 无权限；安全规则拒绝：禁用自己、禁用最后一个有效超管、将最后一个有效超管移出 `super_admin` 组、修改自己的用户组、删除/停用系统组、停用仍有启用中管理员的自定义组、修改 `super_admin` 权限、系统组权限清空、删除仍有管理员的组、登录时账号或用户组已停用 | 无权限时 `{"permission": code}` |
+| 403 | 无权限；安全规则拒绝：禁用自己、禁用最后一个有效超管、将最后一个有效超管移出 `super_admin` 组、修改自己的用户组、删除/停用系统组、停用仍有启用中管理员的自定义组、修改 `super_admin` 权限、把 `super_admin` 组的 `data_scope` 改为非 `all`、系统组权限清空、删除仍有管理员的组、登录时账号或用户组已停用 | 无权限时 `{"permission": code}` |
 | 404 | 管理员/用户组不存在 | — |
 | 409 | `username` 或用户组 `name` 重复 | `{"existing_id": …}` |
 | 429 | 登录失败次数达到上限 | `{"retry_after": 秒}` |
@@ -598,6 +609,21 @@ def adopt_keyword(
 
 `require_permission` 在模块导入时断言权限码存在，拼写错误的权限码会在应用启动时暴露，而不是在运行期永远返回 403。
 
+数据范围由同一文件中的第二个依赖 `get_data_scope` 计算（代码见 [13-user-data-scope](./13-user-data-scope.md) §9.1）：它复用 `get_current_admin` 已加载的用户组，返回 `DataScope(admin_id, scope, owner_id)`，`super_admin` 组短路为 `all`，`own` 范围忽略查询参数 `owner_id`。受数据范围约束的路由同时声明两个依赖：
+
+```python
+@router.get("")
+def list_keywords(
+    query: KeywordQuery = Depends(),
+    admin: Admin = Depends(require_permission("content.keywords.view")),
+    scope: DataScope = Depends(get_data_scope),
+    db: Session = Depends(get_db),
+):
+    return keyword_service.list_keywords(db, scope, query)    # service 以 scope 为必填参数，附加范围谓词
+```
+
+功能权限不足返回 403；对象在数据范围之外按「不存在」返回 404，从不以 403 暴露对象存在性（[13-user-data-scope](./13-user-data-scope.md) §8）。
+
 ### 7.3 权限计算（`server/app/services/admin_rbac_service.py`）
 
 ```python
@@ -652,6 +678,7 @@ sequenceDiagram
 | 更换用户组 | `PUT /admin/admins/{id}`（`group_id` 变化） | 是 | 强制重新登录以刷新前端菜单与权限缓存；安全规则（自己、最后一个有效超管）在递增前校验，拒绝时不递增 |
 | 修改显示名 | `PUT /admin/admins/{id}`（仅 `display_name`） | 否 | — |
 | 修改用户组权限 | `PUT /admin/admin-groups/{id}/permissions` | 否 | 后端实时读库生效；前端在下一次 `/auth/me`（刷新页面或收到带 `data.permission` 的 403 后）更新 |
+| 修改用户组数据范围 | `PUT /admin/admin-groups/{id}`（`data_scope` 变化） | 否 | 同上：`get_data_scope` 每次请求读库，接口立即按新范围过滤；前端 `data_scope` 在下一次 `/auth/me` 更新 |
 
 所有递增都在业务更新的同一事务内完成；令牌本身不存库，也没有黑名单。
 
@@ -741,7 +768,7 @@ def write_audit(db: Session, request: Request, admin: Admin, permission_code: st
 | --- | --- | --- | --- |
 | `/login` | `Login.vue` | —（公开） | 渲染前调用 `GET /admin/auth/site-info` |
 | `/403` | `Forbidden.vue` | —（需登录） | 无权限落点 |
-| `/admins` | `admins/Index.vue` | `security.admins.view` | 管理员管理 |
+| `/admins` | `admins/Index.vue` | `security.admins.view` | 用户管理 |
 | `/admin-groups` | `admin-groups/Index.vue` | `security.groups.view` | 用户组权限 |
 | `/admin-operation-logs` | `admin-operation-logs/Index.vue` | `security.audit.view` | 操作日志 |
 
@@ -760,13 +787,13 @@ def write_audit(db: Session, request: Request, admin: Admin, permission_code: st
 - 成功后 `auth.login()` 写入 token 与 `admin`，跳转 `query.redirect`（存在且以 `/` 开头）否则 `resolveHomePath()`（§9.4）。
 - 顶栏用户区显示 `display_name || username`、用户组名；`zhiqi_mode === "mock"` 时显示「Mock 模式」标签（来源 `GET /admin/auth/me`）。
 
-### 8.3 管理员管理 `admins/Index.vue`
+### 8.3 用户管理 `admins/Index.vue`
 
-列表字段：ID、账号、显示名称、所属用户组、状态、最后登录时间、创建时间、操作。筛选：账号关键词（`keyword`）、用户组（下拉，来源 `listGroups()`）、状态。用户组下拉（筛选与新增/编辑弹窗）依赖 `security.groups.view`：配置自定义组时应把 `security.admins.*` 与 `security.groups.view` 一起授予；缺少该权限时筛选项隐藏、弹窗降级为输入 `group_id`。操作按钮与权限码：
+页面标题与按钮文案统一为「用户」（新增用户、编辑用户、重置密码）。列表字段：ID、账号、显示名称、所属用户组、数据范围（取所属组，`all` 显示「总后台」、`own` 显示「仅本人」）、状态、最后登录时间、创建时间、操作。筛选：账号关键词（`keyword`）、用户组（下拉，来源 `listGroups()`）、状态。用户组下拉（筛选与新增/编辑弹窗）依赖 `security.groups.view`：配置自定义组时应把 `security.admins.*` 与 `security.groups.view` 一起授予；缺少该权限时筛选项隐藏、弹窗降级为输入 `group_id`。操作按钮与权限码：
 
 | 按钮 | 权限码 | 行为 |
 | --- | --- | --- |
-| 新增管理员 | `security.admins.create` | 弹窗：账号、显示名称、所属用户组（仅 `is_active` 组）、初始密码、状态；前端按 §6.2 规则预校验 |
+| 新增用户 | `security.admins.create` | 弹窗：账号、显示名称、所属用户组（仅 `is_active` 组，每项显示其数据范围）、初始密码、状态；前端按 §6.2 规则预校验 |
 | 编辑 | `security.admins.update` | 弹窗只含显示名称、所属用户组；不回显密码；当前登录管理员自己这一行的用户组下拉禁用；把最后一个有效超管移出 `super_admin` 组由后端 403 拒绝，前端直接展示 `message` |
 | 启用/禁用 | `security.admins.status` | 二次确认；自己这一行禁用按钮置灰；禁用成功后提示「该管理员的登录状态已失效」 |
 | 重置密码 | `security.admins.reset_password` | 单独弹窗：新密码 + 确认；成功提示「密码已重置，旧登录状态已失效」；密码不再展示 |
@@ -777,11 +804,12 @@ def write_audit(db: Session, request: Request, admin: Admin, permission_code: st
 
 左右布局：左侧用户组列表（名称、系统组标签、`admin_count`、状态），右侧为选中组的详情：
 
-- 基本信息表单：名称、说明、状态；系统组的「状态」开关禁用；保存 → `PUT /admin/admin-groups/{id}`（`security.groups.update`）。
+- 基本信息表单：名称、说明、状态、数据范围（`el-radio-group`：「全部数据（总后台）」/「仅本人负责的项目」，说明文字「仅本人：只能看到自己负责的项目及其下数据与统计」）；系统组的「状态」开关禁用，`super_admin` 组的数据范围禁用；保存 → `PUT /admin/admin-groups/{id}`（`security.groups.update`）。左侧列表每组显示数据范围标签。
+- 数据范围为「仅本人」的组勾选 `security.*`、`system.settings.*` 等总后台职能权限时，权限树上方显示提示「这些权限不受数据范围限制」（[13-user-data-scope](./13-user-data-scope.md) §4.3）。
 - 权限树：数据来自 `GET /admin/admin-permissions/tree`（页面内缓存一次），用 `el-tree` 渲染「模块 → 页面（menu）→ 操作（action）」三层，`node-key="code"`、`show-checkbox`、`check-strictly=true` 并自定义联动：勾选 action 自动勾选其父 `view`；取消 `view` 自动取消其全部 action；模块节点提供「全选 / 取消全选 / 展开 / 收起」。
 - 保存 → `PUT /admin/admin-groups/{id}/permissions`（`security.groups.assign`）；提交前在前端按 §4.3 补齐依赖并高亮「自动勾选」的节点；以响应 `permission_codes` 回显最终结果。
 - `super_admin` 组：权限树全选且只读，保存按钮隐藏；其它系统组可改权限，但不能删除、停用。
-- 新增用户组（`security.groups.create`）弹窗：名称、说明、状态；创建后自动选中并进入权限配置。删除（`security.groups.delete`）按钮在 `is_system` 或 `admin_count > 0` 时禁用并给出原因提示。
+- 新增用户组（`security.groups.create`）弹窗：名称、说明、状态、数据范围（缺省「仅本人」）；创建后自动选中并进入权限配置。删除（`security.groups.delete`）按钮在 `is_system` 或 `admin_count > 0` 时禁用并给出原因提示。
 
 ### 8.5 操作日志 `admin-operation-logs/Index.vue`
 
@@ -818,6 +846,7 @@ export const useAuthStore = defineStore("adminAuth", {
     permissions: (s) => s.admin?.permissions ?? [],
     hasPermission(): (code: string) => boolean { return (code) => this.permissions.includes(code); },
     isSuperAdmin: (s) => s.admin?.group?.code === "super_admin",
+    isAllScope: (s) => s.admin?.data_scope === "all",          // 总后台视角（数据范围 all），见 13 §12
   },
   actions: {
     setAdmin(admin: AdminProfile) { this.admin = admin; this.hydrated = true; localStorage.setItem("admin_profile", JSON.stringify(admin)); },
@@ -854,7 +883,7 @@ export function usePermission() {
   const has = (code: string) => auth.hasPermission(code);
   const hasAny = (codes: string[]) => codes.some(has);
   const hasAll = (codes: string[]) => codes.every(has);
-  return { has, hasAny, hasAll, permissions: computed(() => auth.permissions), isSuperAdmin: computed(() => auth.isSuperAdmin) };
+  return { has, hasAny, hasAll, permissions: computed(() => auth.permissions), isSuperAdmin: computed(() => auth.isSuperAdmin), isAllScope: computed(() => auth.isAllScope) };
 }
 ```
 
@@ -972,14 +1001,14 @@ const visibleMenuGroups = computed(() =>
 
 ```ts
 export interface AdminGroupRef { id: number; code: string; name: string }
-export interface AdminProfile { id: number; username: string; display_name: string | null; group: AdminGroupRef | null; permissions: string[]; last_login_at?: string | null; zhiqi_mode?: "mock" | "live" }
-export interface AdminItem { id: number; username: string; display_name: string | null; group: AdminGroupRef | null; is_active: boolean; last_login_at: string | null; created_by: number | null; created_at: string; permissions?: string[] }
-export interface AdminGroupItem { id: number; code: string; name: string; name_en: string; description: string | null; is_system: boolean; is_active: boolean; admin_count: number; created_at: string; permission_codes?: string[] }
+export interface AdminProfile { id: number; username: string; display_name: string | null; group: AdminGroupRef | null; permissions: string[]; data_scope: DataScope; last_login_at?: string | null; zhiqi_mode?: "mock" | "live" }
+export interface AdminItem { id: number; username: string; display_name: string | null; group: AdminGroupRef | null; data_scope: DataScope; is_active: boolean; last_login_at: string | null; created_by: number | null; created_at: string; permissions?: string[] }
+export interface AdminGroupItem { id: number; code: string; name: string; name_en: string; description: string | null; is_system: boolean; is_active: boolean; data_scope: DataScope; admin_count: number; created_at: string; permission_codes?: string[] }
 export interface AdminPermissionItem { code: string; module: string; name: string; type: "menu" | "action"; parent_code: string | null; sort: number }
 export interface AdminOperationLogItem { id: number; admin: { id: number; username: string; display_name: string | null } | null; group_name: string | null; permission_code: string; action: "create" | "update" | "update_status" | "delete" | "execute" | "login" | "logout" | "reset_password"; target_type: string; target_id: string | null; summary: string; request_id: string | null; ip: string | null; created_at: string }
 ```
 
-前端控制（菜单、路由、按钮）只用于交互体验，所有安全判断以后端 `require_permission` 为准。
+`DataScope` 来自 `enums.ts` 的 `DATA_SCOPE`（`"all" | "own"`），`OwnerOption` 等用户系统类型见 [13-user-data-scope](./13-user-data-scope.md) §12.4。前端控制（菜单、路由、按钮）只用于交互体验，所有安全判断以后端 `require_permission` 与 `get_data_scope` 为准。
 
 ## 10. 安全规则
 
@@ -996,6 +1025,7 @@ export interface AdminOperationLogItem { id: number; admin: { id: number; userna
 11. 所有以上规则拒绝时返回 403（`CODE_FORBIDDEN`），不用 400 混淆「参数错误」与「规则拒绝」。
 12. 敏感配置（`ZHIQI_API_KEY`、`OSS_SECRET_KEY`、SMTP 密码、告警 webhook 密钥等）只来自环境变量；`GET /admin/settings` 对密钥类字段只返回 `configured:true/false`，日志与 `summary` 同样脱敏（规则见 [08-zhiqiapi-integration](./08-zhiqiapi-integration.md)）。
 13. 默认超管 `admin/admin123` 仅用于首次部署，启动日志提示修改；`seeds/seed.py` 不会覆盖已存在账号的密码。
+14. `super_admin` 组的数据范围固定为 `all`：`PUT /admin/admin-groups/{id}` 改为其它值返回 403，`get_data_scope` 对该组短路为 `all`，`ensure_rbac_seed` 启动时写回；修改任一用户组的数据范围都写审计（前后值）。数据范围之外的对象一律 404，不以 403 暴露存在性（[13-user-data-scope](./13-user-data-scope.md) §8、§13）。
 
 ## 11. 测试范围
 
@@ -1010,6 +1040,7 @@ export interface AdminOperationLogItem { id: number; admin: { id: number; userna
 - 审计：新增/编辑/禁用管理员、重置密码、分配权限、登录、登出各产生一条记录，`action`/`target_type`/`target_id`/`request_id` 正确；`POST …/preview` 不产生记录；`summary` 中不含密码；遍历 `app.routes` 中全部 `/api/v1/admin/*` 的 `POST`/`PUT`/`PATCH`/`DELETE` 路由，断言 `resolve_action` 命中显式规则（不落入兜底）且 `resolve_target_type` 非空。
 - seed：`ensure_rbac_seed` 重复执行幂等；新增一个权限码后再次执行，`super_admin` 自动获得该码而 `operator` 不变。
 - 直接调用接口无法绕过前端按钮隐藏（所有写接口在无权限 token 下为 403）。
+- 数据范围（本文件只覆盖用户组侧，业务数据隔离见 [13-user-data-scope](./13-user-data-scope.md) §16 的 `test_data_scope.py`）：系统组默认 `data_scope` 与 §5.1 一致；新建自定义组缺省 `own`；`PUT` 修改 `data_scope` 写审计且不递增成员 `token_version`；`super_admin` 的 `data_scope` 改为 `own` → 403；`ensure_rbac_seed` 不改写已调整的 `operator`/`reviewer`/`read_only`，会把被篡改的 `super_admin` 写回 `all`；`login`/`me`/`GET /admin/admins` 返回 `data_scope`。
 
 ### 管理端
 
@@ -1017,7 +1048,7 @@ export interface AdminOperationLogItem { id: number; admin: { id: number; userna
 - 直接输入无权限路由进入 403 页面；刷新页面后仍能通过 `/auth/me` 恢复权限并正确渲染。
 - `v-permission` 按钮在无权限时不显示；数组写法任一满足即显示。
 - 401 清除登录态并回到登录页（带 `redirect`）；登录页提交错误密码只显示「用户名或密码错误」、不跳转；403 保留登录态：带 `data.permission` 的 403 提示「无权执行此操作」并刷新权限、菜单随之更新；安全规则拒绝（`data` 为 null）直接展示后端 `message`，不调用 `/auth/me`。
-- 用户组权限树回显、action → view 联动、模块全选/取消、保存后回显补齐结果正确；`super_admin` 组只读。
+- 用户组权限树回显、action → view 联动、模块全选/取消、保存后回显补齐结果正确；`super_admin` 组只读；数据范围单选可保存，`super_admin` 组禁用；用户管理列表显示数据范围。
 - 登录页 429 倒计时；修改密码成功后被强制重新登录；Mock 模式标签显示。
 
 ## 12. 验收标准
@@ -1029,17 +1060,18 @@ export interface AdminOperationLogItem { id: number; admin: { id: number; userna
 5. 不可能禁用自己、禁用最后一个超级管理员或把它移出 `super_admin` 组，不可能删除或停用系统用户组。
 6. 登录失败 5 次后账号锁定 15 分钟，锁定期间返回 429。
 7. 所有后台写操作都能在操作日志中追溯到管理员、时间、权限码、动作、目标对象与 `request_id`，且日志中不含任何密码、密钥或令牌。
-8. 首次部署执行迁移与 seed 后（在 `server/` 目录执行 `alembic upgrade head && python seeds/seed.py`；Docker 部署在容器内执行同一命令，见 [05-deployment](./05-deployment.md)），即可用 `admin/admin123` 登录，看到全部菜单。
+8. 每个用户组都有数据范围：`operator` 默认只能看到本人负责的项目数据，`super_admin`/`reviewer`/`read_only` 默认看到全部；修改后立即生效，`super_admin` 不可改（业务侧隔离的验收见 [13-user-data-scope](./13-user-data-scope.md) §17）。
+9. 首次部署执行迁移与 seed 后（在 `server/` 目录执行 `alembic upgrade head && python seeds/seed.py`；Docker 部署在容器内执行同一命令，见 [05-deployment](./05-deployment.md)），即可用 `admin/admin123` 登录，看到全部菜单。
 
 ## 13. 实施顺序
 
 对应 [README](./README.md) 实施顺序的第 1、2 步：
 
-1. `server/app/core/admin_permissions.py`（`PERMISSIONS`、`PERMISSION_CODES`、`PERMISSION_DEPENDENCIES`、`SYSTEM_GROUPS`、`OPERATOR_EXCLUDED`、`DEFAULT_GROUP_PERMISSIONS`）与 `models.py` 中的 RBAC 五表；迁移 `0001_initial.py`、`0002_seed_permissions.py`；`seeds/seed.py` 的默认超管。
-2. `core/security.py`、`core/ratelimit.py`、`api/deps.py`（`get_current_admin`、`require_permission`、`get_pagination`）、`services/admin_rbac_service.py`（`ensure_rbac_seed`、`permission_codes`、`has_permission`、`write_audit`）。
+1. `server/app/core/admin_permissions.py`（`PERMISSIONS`、`PERMISSION_CODES`、`PERMISSION_DEPENDENCIES`、`SYSTEM_GROUPS`（含 `data_scope`）、`OPERATOR_EXCLUDED`、`DEFAULT_GROUP_PERMISSIONS`）与 `models.py` 中的 RBAC 五表（`admin_groups.data_scope`）；迁移 `0001_initial.py`、`0002_seed_permissions.py`；`seeds/seed.py` 的默认超管。
+2. `core/security.py`、`core/ratelimit.py`、`api/deps.py`（`get_current_admin`、`require_permission`、`get_data_scope`、`get_pagination`）、`services/admin_rbac_service.py`（`ensure_rbac_seed`、`permission_codes`、`has_permission`、`write_audit`）、`services/data_scope_service.py`（[13-user-data-scope](./13-user-data-scope.md) §9）。
 3. `main.py`：`request_id_middleware`、`admin_audit_middleware`、`AUDIT_TARGET_TYPES`、启动时 `lock:bootstrap` 内的 `ensure_rbac_seed`。
 4. `api/admin/auth.py`、`admins.py`、`admin_groups.py`、`admin_permissions.py`、`operation_logs.py` 与对应 `schemas/auth.py`、`schemas/admin_rbac.py`；`tests/test_admin_rbac.py`。
-5. 为后续每个业务路由文件按 [04-api-spec](./04-api-spec.md) 权限码列逐接口绑定 `require_permission`（随各功能文档实施）。
+5. 为后续每个业务路由文件按 [04-api-spec](./04-api-spec.md) 权限码列逐接口绑定 `require_permission`，受范围约束的路由同时声明 `get_data_scope`（随各功能文档实施，[13-user-data-scope](./13-user-data-scope.md) §9.3）。
 6. 管理端：`store/auth.ts`、`composables/usePermission.ts`、`directives/permission.ts`、`router/index.ts`（守卫、`resolveHomePath`）、`Layout.vue` 菜单配置与过滤、`api/client.ts` 401/403 处理、`Login.vue`、`Forbidden.vue`。
-7. 管理端页面：`admins/Index.vue`、`admin-groups/Index.vue`（权限树）、`admin-operation-logs/Index.vue`、修改密码弹窗。
-8. 安全回归：按 §11 清单跑通后端测试与管理端手工用例，确认默认超管登录、四个系统组菜单差异与审计记录。
+7. 管理端页面：`admins/Index.vue`（用户管理，含数据范围列）、`admin-groups/Index.vue`（权限树 + 数据范围单选）、`admin-operation-logs/Index.vue`、修改密码弹窗。
+8. 安全回归：按 §11 清单跑通后端测试与管理端手工用例，确认默认超管登录、四个系统组菜单与数据范围差异、审计记录。

@@ -1,12 +1,12 @@
 # aicreat
 
-aicreat 是面向运营 / 内容团队的 **AI 内容生成与效果监控平台**（B 端内部工具）。在一个管理后台内完成「**关键词生成 → 标题生成 → 内容生成（大纲 / 正文 / SEO 要素）→ 图片 / 视频生成 → 运营手工发布后回填链接 → 链接删除检测 + SEO / GEO 收录检测 → 告警 + 控制台报表**」的闭环；全部文本、图片、视频 AI 能力统一经 **zhiqiapi（志奇引擎，`https://zhiqiapi.com/v1`）** 接入，`ZHIQI_API_KEY` 留空时全链路走本地 Mock，无密钥即可跑通。
+aicreat 是面向运营 / 内容团队的 **AI 内容生成与效果监控平台**（B 端工具，带用户系统：每个用户只能看到自己的数据，总后台看全部）。在一个管理后台内完成「**关键词生成 → 标题生成 → 内容生成（大纲 / 正文 / SEO 要素）→ 图片 / 视频生成 → 运营手工发布后回填链接 → 链接删除检测 + SEO / GEO 收录检测 → 告警 + 控制台报表**」的闭环；全部文本、图片、视频 AI 能力统一经 **zhiqiapi（志奇引擎，`https://zhiqiapi.com/v1`）** 接入，`ZHIQI_API_KEY` 留空时全链路走本地 Mock，无密钥即可跑通。
 
 后端 **Python 3.11 + FastAPI + SQLAlchemy 2.x / Alembic + MySQL 8 + Redis 7**，两个轮询式 worker 进程（`app.worker` 负责 AI 任务，`app.monitor_worker` 负责监控与聚合），唯一前端为 **Vue 3 + Vite + Element Plus** 管理后台，pnpm monorepo。技术栈与工程约定完全沿用本地 `navigation` 工程。完整设计文档见 [docs/README.md](docs/README.md)。
 
 ## 功能概览
 
-所有业务接口都在 `/api/v1/admin/*` 之下（管理员 JWT + 权限码），下表接口列省略 `/api/v1` 前缀，权限模块列的 `module.resource.*` 表示该资源下的全部权限码（如 `content.keywords.*` = `content.keywords.view/generate/create/import/update/status/delete`）；接口全表见 [docs/04-api-spec.md](docs/04-api-spec.md)，权限码全表见 [docs/07-admin-rbac.md](docs/07-admin-rbac.md)。
+所有业务接口都在 `/api/v1/admin/*` 之下（管理员 JWT + 权限码 + 数据范围），下表接口列省略 `/api/v1` 前缀，权限模块列的 `module.resource.*` 表示该资源下的全部权限码（如 `content.keywords.*` = `content.keywords.view/generate/create/import/update/status/delete`）；接口全表见 [docs/04-api-spec.md](docs/04-api-spec.md)，权限码全表见 [docs/07-admin-rbac.md](docs/07-admin-rbac.md)。
 
 | 模块 | 能力 | 主要接口 | 后台页面（`apps/admin/src/views/`） | 权限模块 |
 | --- | --- | --- | --- | --- |
@@ -27,20 +27,21 @@ aicreat 是面向运营 / 内容团队的 **AI 内容生成与效果监控平台
 | 告警中心 | 11 种 `alert_type`：`link_deleted`/`link_restored`/`link_changed`/`index_overdue`/`ai_task_failures`/`ai_breaker_open`/`ai_quota_exceeded`/`ai_auth_failed`/`ai_upstream_unavailable`/`media_task_failed`/`worker_stale`；按 `dedupe_key` 去重；`open → acknowledged → resolved`，可 `ignored`；站内通道固定，webhook / 邮件预留；顶栏铃铛 60s 轮询未处理数 | `/admin/alerts`、`/admin/alerts/summary`、`/admin/alerts/{id}/acknowledge`·`resolve`·`ignore`、`/admin/alerts/batch-resolve` | `alerts/Index.vue`、`components/AlertBadge.vue` | `monitoring.alerts.*` |
 | 控制台与报表 | 总览 KPI（关键词 / 标题 / 文章数、回填链接数、存活率、SEO 收录率、GEO 引用率、AI 调用次数 / 成功率 / 平均耗时、额度消耗与估算费用、图片 / 视频生成数、未处理告警）与环比；日 / 周 / 月趋势；按项目 / 平台 / 人员 / 模型 / 能力 / 引擎分解；榜单（收录最快文章、被删最多平台、消耗最高模型 / 项目、失败最多模型）；CSV 导出；`daily_stats` 预聚合 + Redis 实时计数兜底 + 重算 | `/admin/stats/overview`、`/admin/stats/trends`、`/admin/stats/breakdown`、`/admin/stats/rankings`、`GET /admin/stats/export`、`POST /admin/stats/recompute` | `Dashboard.vue`、`stats/Reports.vue` | `dashboard.view`、`stats.reports.*` |
 | 系统配置 | `settings(key, locale, value)` JSON 配置键：`generation_config`/`media_config`/`monitoring_config`/`geo_engines`/`seo_providers`/`alert_config`/`ai_routing_config`/`stats_config`/`system_info`；密钥只在环境变量，后台仅显示 `configured` | `/admin/settings`、`GET /admin/settings/runtime` | `settings/Index.vue` | `system.settings.*` |
-| 管理员与权限 | 管理员、用户组、90 个权限码（`menu`（`*.view`）与 `action` 两级）、系统用户组、操作日志（审计中间件自动记录写接口） | `/admin/auth/*`、`/admin/admins`、`/admin/admin-groups`、`/admin/admin-permissions`、`/admin/admin-operation-logs` | `admins/Index.vue`、`admin-groups/Index.vue`、`admin-operation-logs/Index.vue` | `security.*` |
+| 用户与权限 | 用户（后台账号）、用户组、90 个权限码（`menu`（`*.view`）与 `action` 两级）、系统用户组、操作日志（审计中间件自动记录写接口） | `/admin/auth/*`、`/admin/admins`、`/admin/admin-groups`、`/admin/admin-permissions`、`/admin/admin-operation-logs` | `admins/Index.vue`（用户管理）、`admin-groups/Index.vue`、`admin-operation-logs/Index.vue` | `security.*` |
+| 数据隔离（用户系统） | 用户组的数据范围 `data_scope`：`own` 的普通用户只能看到、操作自己负责的项目（`projects.owner_id`）及其下全部数据、告警与统计，`all` 的总后台看全部；总后台可为用户开设 / 转移项目、在顶栏切换到任一用户视角（`owner_id`）、按用户分解报表；范围外对象一律 404，回填他人已回填的 URL 返回 `owned_by_other` | 所有业务接口的 `owner_id` 参数、`GET /admin/projects/owner-options`、`GET /admin/stats/breakdown?dimension=owner` | 顶栏 `components/OwnerSelect.vue`、`admin-groups/Index.vue`（数据范围）、`projects/Index.vue`（负责人） | 无新增权限码（由用户组 `data_scope` 决定） |
 
-各模块的完整设计：数据表与一致性规则 [docs/03-data-model.md](docs/03-data-model.md)；关键词 / 标题 / 内容生成与 Prompt 模板 [docs/09-generation-pipeline.md](docs/09-generation-pipeline.md)；图片 / 视频生成 [docs/10-media-generation.md](docs/10-media-generation.md)；回填链接、删除检测、收录检测与告警 [docs/11-link-backfill-and-monitoring.md](docs/11-link-backfill-and-monitoring.md)；控制台与报表 [docs/12-dashboard-reports.md](docs/12-dashboard-reports.md)；zhiqiapi 适配层与 AI 网关 [docs/08-zhiqiapi-integration.md](docs/08-zhiqiapi-integration.md)。
+各模块的完整设计：用户系统与数据隔离 [docs/13-user-data-scope.md](docs/13-user-data-scope.md)；数据表与一致性规则 [docs/03-data-model.md](docs/03-data-model.md)；关键词 / 标题 / 内容生成与 Prompt 模板 [docs/09-generation-pipeline.md](docs/09-generation-pipeline.md)；图片 / 视频生成 [docs/10-media-generation.md](docs/10-media-generation.md)；回填链接、删除检测、收录检测与告警 [docs/11-link-backfill-and-monitoring.md](docs/11-link-backfill-and-monitoring.md)；控制台与报表 [docs/12-dashboard-reports.md](docs/12-dashboard-reports.md)；zhiqiapi 适配层与 AI 网关 [docs/08-zhiqiapi-integration.md](docs/08-zhiqiapi-integration.md)。
 
 ### 角色
 
-无 C 端用户。四个系统用户组（`admin_groups.is_system=1`，不可删除 / 停用），默认权限的完整规则见 [docs/07-admin-rbac.md](docs/07-admin-rbac.md)：
+无 C 端用户，账号由总后台在「系统 → 用户管理」创建（无自助注册）。每个用户经所属用户组获得**功能权限**（权限码）与**数据范围**（`data_scope`）：`own` 只能看到本人负责的项目及其下数据，`all` 即总后台、看全部用户的数据（[docs/13-user-data-scope.md](docs/13-user-data-scope.md)）。四个系统用户组（`admin_groups.is_system=1`，不可删除 / 停用），默认权限的完整规则见 [docs/07-admin-rbac.md](docs/07-admin-rbac.md)：
 
-| 用户组 code | 名称 | 默认权限（摘要） |
-| --- | --- | --- |
-| `super_admin` | 超级管理员 | 全部 90 个权限码 |
-| `operator` | 运营人员 | `dashboard.view`、`system.upload.*`、全部 `content.*`（不含 `content.contents.review`、`content.projects.delete`、`content.prompt_templates.publish`、`content.prompt_templates.delete`）、全部 `media.*`、全部 `publish.links.*`、`publish.platforms.view`、全部 `monitoring.*`、`ai.*.view` + `ai.tasks.retry`/`ai.tasks.cancel`、`stats.reports.view`/`stats.reports.export` |
-| `reviewer` | 审核人员 | `dashboard.view`、`content.*.view` + `content.contents.review`/`update`/`export`、`media.*.view`、`publish.*.view`、`monitoring.*.view`、`stats.reports.view` |
-| `read_only` | 只读 | 全部 `*.view`（不含 `security.*` 与 `system.settings.view`）+ `stats.reports.export` |
+| 用户组 code | 名称 | 默认数据范围 | 默认权限（摘要） |
+| --- | --- | --- | --- |
+| `super_admin` | 超级管理员 | `all`（固定，总后台） | 全部 90 个权限码 |
+| `operator` | 运营人员 | `own`（只看本人项目） | `dashboard.view`、`system.upload.*`、全部 `content.*`（不含 `content.contents.review`、`content.projects.delete`、`content.prompt_templates.publish`、`content.prompt_templates.delete`）、全部 `media.*`、全部 `publish.links.*`、`publish.platforms.view`、全部 `monitoring.*`、`ai.*.view` + `ai.tasks.retry`/`ai.tasks.cancel`、`stats.reports.view`/`stats.reports.export` |
+| `reviewer` | 审核人员 | `all` | `dashboard.view`、`content.*.view` + `content.contents.review`/`update`/`export`、`media.*.view`、`publish.*.view`、`monitoring.*.view`、`stats.reports.view` |
+| `read_only` | 只读 | `all` | 全部 `*.view`（不含 `security.*` 与 `system.settings.view`）+ `stats.reports.export` |
 
 ### 端到端流程
 
@@ -118,7 +119,7 @@ flowchart LR
 
 ```text
 aicreat/
-├── docs/                                  设计文档：README（索引）+ 00~12
+├── docs/                                  设计文档：README（索引）+ 00~13
 ├── server/                                FastAPI 后端 + 两个 worker（包名 aicreat-server）
 │   ├── app/
 │   │   ├── main.py                        create_app()：路由、CORS、异常处理、审计中间件、/media 静态、启动 ensure_*
@@ -139,7 +140,7 @@ aicreat/
 │   ├── migrations/versions/               0001_initial.py（24 张表）、0002_seed_permissions.py（权限码与系统用户组）
 │   ├── seeds/seed.py                      幂等 seed：超管 admin/admin123、示例项目、系统 Prompt 模板、默认平台
 │   ├── scripts/integration_smoke.py       Mock 模式端到端冒烟
-│   ├── tests/                             pytest：admin_rbac / zhiqi_adapter / generation / media / links / monitoring / stats
+│   ├── tests/                             pytest：admin_rbac / data_scope / zhiqi_adapter / generation / media / links / monitoring / stats
 │   ├── storage/                           本地 Mock 存储（gitignore），经 /media 暴露
 │   └── alembic.ini · pyproject.toml · Dockerfile · .env.example
 ├── apps/admin/                            唯一前端：Vue 3 管理后台（base /admin/，端口 5174）
@@ -245,6 +246,7 @@ Vite 把 `/api`、`/media` 代理到 `http://127.0.0.1:8100`；登录页先调�
 5. 「回填链接」→ 对 `approved` 内容回填一条**公网**文章 URL（平台自动识别），内容变为 `published`，链接进入 `pending` 并立即入队基线检测；monitor-worker 完成后 `alive_status` 变为 `alive`（删除检测不 Mock，真实抓取；回填 `127.0.0.1` / 内网地址时检测结果为 `unknown`（`matched_rule=ssrf_blocked`），链接状态在连续 3 次 `unknown` 之前保持 `pending`，并按 6h → 12h → 24h 退避复检）。
 6. 链接详情 → 「立即收录检测」（SEO + GEO），Mock 下各引擎按 70% 概率返回 `indexed` / `cited`，证据 `source="mock"`；「告警中心」与「AI 网关 → AI 任务 / 用量对账」可看到对应记录（Mock 的伪用量日志同样走对账流程）。
 7. 「控制台」总览 KPI 与「报表」趋势 / 分解 / 榜单有数据（今日由 Redis 实时计数兜底，`daily_stats` 每日 00:30 聚合）。注意 `seo_index_rate` / `geo_cite_rate` 的分母只含完成过 ≥ 1 轮 `scheduled` 收录检测的链接（`index_checks_done >= 1`；第 6 步的手动检测与人工标记不计入），刚回填的链接会使二者为 null：要在手工流程里看到非 null 值，回填时把 `published_at` 填为 31 天前（排程直接进入「每月一次」轮次、立即到期），等 `schedule_index_checks`（每 300s 扫描）入队并由 monitor-worker 完成一轮 `scheduled` 检测即可，口径见 [docs/12-dashboard-reports.md](docs/12-dashboard-reports.md)。
+8. 数据隔离（用户系统）：在「系统 → 用户管理」新建两个 `operator` 用户，各自登录建项目并生成关键词——彼此看不到对方的数据（列表为空、直接访问 ID 返回 404），控制台只统计自己；`admin` 在顶栏用户视角切换器选中某用户后看到的与该用户本人一致。完整步骤见 [docs/06-getting-started.md](docs/06-getting-started.md) 第五节第 15 步。
 
 逐步说明、接入真实 zhiqiapi 与排错见 [docs/06-getting-started.md](docs/06-getting-started.md)。
 
@@ -281,7 +283,7 @@ zhiqiapi 契约中已核实的部分（基址与鉴权、`x-oneapi-request-id`�
 | --- | --- | --- | --- |
 | `admin` | `admin123` | `super_admin` | 由 `seeds/seed.py` 幂等创建（账号 / 密码取自 `SEED_ADMIN_USERNAME` / `SEED_ADMIN_PASSWORD`），启动日志提示修改密码 |
 
-- seed 只创建这一个账号；运营 / 审核 / 只读账号在后台「系统 → 管理员」新建并分配到 `operator` / `reviewer` / `read_only`（四个系统用户组由迁移 `0002_seed_permissions` 写入）。
+- seed 只创建这一个账号（数据范围固定 `all`，即总后台）；运营 / 审核 / 只读账号在后台「系统 → 用户管理」新建并分配到 `operator`（只看本人项目）/ `reviewer` / `read_only`（四个系统用户组及其默认数据范围由迁移 `0002_seed_permissions` 写入）；示例项目的负责人是 `admin`，`operator` 用户登录后看不到它，需自建项目或由总后台转移负责人（验证步骤见 [docs/06-getting-started.md](docs/06-getting-started.md) 第五节第 15 步）。
 - 首次登录后用 `POST /api/v1/admin/auth/change-password` 改密（密码 ≥ 8 位且含字母与数字），改密 / 登出使 `token_version += 1`，旧令牌立即失效（管理员被重置密码、启用 / 禁用、更换用户组时同样递增，见 [docs/07-admin-rbac.md](docs/07-admin-rbac.md) §7.4）；令牌有效期 `ADMIN_JWT_EXPIRE_SECONDS=7200`。
 - 登录 15 分钟内失败 5 次锁定（`ADMIN_LOGIN_MAX_FAILURES`，Redis `rate:admin_login:{username}`）。
 - 安全规则同 navigation：不可禁用自己、不可禁用 / 移除最后一个有效超管、系统组不可删除 / 停用 / 清空权限、管理员不物理删除；生产环境必须修改 `ADMIN_JWT_SECRET`。
@@ -341,7 +343,7 @@ docker compose up -d            # mysql / redis / server / worker / monitor-work
 
 ## 文档
 
-设计文档索引（00~12 各篇说明、代码入口表、实施顺序 1~10）见 [docs/README.md](docs/README.md)；功能设计类文档 07~12 末尾均含「测试范围」「验收标准」「实施顺序」。
+设计文档索引（00~13 各篇说明、代码入口表、实施顺序 1~10）见 [docs/README.md](docs/README.md)；功能设计类文档 07~13 末尾均含「测试范围」「验收标准」「实施顺序」。
 
 ## 说明
 

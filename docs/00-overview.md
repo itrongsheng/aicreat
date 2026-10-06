@@ -4,7 +4,7 @@
 
 ## 1. 产品定位
 
-aicreat 是面向运营 / 内容团队的 **AI 内容生成与效果监控平台**（内部工具，B 端，无 C 端用户）。它把内容运营的完整链路收口到同一个管理后台：
+aicreat 是面向运营 / 内容团队的 **AI 内容生成与效果监控平台**（B 端工具，无 C 端用户；账号由总后台开设，每个用户只能看到自己的数据，总后台看全部）。它把内容运营的完整链路收口到同一个管理后台：
 
 | 主线 | 做什么 | 落到哪里 |
 | --- | --- | --- |
@@ -20,16 +20,17 @@ aicreat 是面向运营 / 内容团队的 **AI 内容生成与效果监控平台
 
 ## 2. 目标用户与角色
 
-平台只有「管理员」这一类用户（表 `admins`），通过用户组（`admin_groups`）获得权限码（`admin_permissions`，格式 `module.resource.action`，`menu` 型 `*.view` 与 `action` 型两级）。所有业务接口都在 `/api/v1/admin/*` 之下，需要管理员 JWT（`aud=admin`，`token_version` 失效机制）+ 权限码；只有 `POST /api/v1/admin/auth/login`、`GET /api/v1/admin/auth/site-info`、`GET /api/v1/health` 与媒体文件 `GET /media/{key}` 公开。
+平台的用户就是后台账号（表 `admins`，界面称「用户」，代码沿用 `admin` 命名），通过用户组（`admin_groups`）同时获得两样东西：**功能权限**——权限码（`admin_permissions`，格式 `module.resource.action`，`menu` 型 `*.view` 与 `action` 型两级）；**数据范围**——`admin_groups.data_scope`：`own`（仅本人）的普通用户只能看到、操作自己负责的项目（`projects.owner_id`）及其下全部数据与统计，`all`（全部数据）即「总后台」，看全部用户的数据并可切换到任一用户的视角（[13-user-data-scope](./13-user-data-scope.md)）。所有业务接口都在 `/api/v1/admin/*` 之下，需要管理员 JWT（`aud=admin`，`token_version` 失效机制）+ 权限码，并按数据范围过滤；只有 `POST /api/v1/admin/auth/login`、`GET /api/v1/admin/auth/site-info`、`GET /api/v1/health` 与媒体文件 `GET /media/{key}` 公开。
 
-| 角色 | 系统用户组 `admin_groups.code` | 典型工作 | 默认权限范围（摘要；完整规则见 [07-admin-rbac](./07-admin-rbac.md)） |
-| --- | --- | --- | --- |
-| 超级管理员 | `super_admin` | 系统配置、「AI 网关 → 能力路由」与「AI 网关 → 模型目录」、管理员与用户组、发布平台规则、Prompt 模板发布、项目删除、重算统计 | 全部权限码（`PERMISSION_CODES` 全集） |
-| 运营人员 | `operator` | 建项目、生成 / 采用关键词与标题、生成 / 编辑 / 提审内容、生成配图与视频、手工发布后回填链接、手动检测、处理告警、看报表 | `dashboard.view`；`content.*`（不含 `content.contents.review`、`content.projects.delete`、`content.prompt_templates.publish`、`content.prompt_templates.delete`）；`media.*`；`publish.links.*` 与 `publish.platforms.view`；`monitoring.*`；`ai.*.view` + `ai.tasks.retry` / `ai.tasks.cancel`；`stats.reports.view` / `stats.reports.export`；`system.upload.view` / `system.upload.create` |
-| 审核人员 | `reviewer` | 审核内容（通过 / 驳回），必要时直接修改正文；查看生产数据与监控结果 | `dashboard.view`；`content.*.view` + `content.contents.review` / `content.contents.update` / `content.contents.export`；`media.*.view`；`publish.*.view`；`monitoring.*.view`；`stats.reports.view` |
-| 只读 | `read_only` | 查看控制台与报表、导出报表、查看非敏感数据 | 除 `security.*` 与 `system.settings.view` 外的全部 `*.view`，加 `stats.reports.export` |
+| 角色 | 系统用户组 `admin_groups.code` | 典型工作 | 默认数据范围 | 默认权限范围（摘要；完整规则见 [07-admin-rbac](./07-admin-rbac.md)） |
+| --- | --- | --- | --- | --- |
+| 超级管理员 | `super_admin` | 总后台：系统配置、「AI 网关 → 能力路由」与「AI 网关 → 模型目录」、用户与用户组、为用户开设 / 转移项目、发布平台规则、Prompt 模板发布、项目删除、重算统计 | `all`（固定） | 全部权限码（`PERMISSION_CODES` 全集） |
+| 运营人员 | `operator` | 普通用户：建项目、生成 / 采用关键词与标题、生成 / 编辑 / 提审内容、生成配图与视频、手工发布后回填链接、手动检测、处理告警、看报表——全部限于本人负责的项目 | `own` | `dashboard.view`；`content.*`（不含 `content.contents.review`、`content.projects.delete`、`content.prompt_templates.publish`、`content.prompt_templates.delete`）；`media.*`；`publish.links.*` 与 `publish.platforms.view`；`monitoring.*`；`ai.*.view` + `ai.tasks.retry` / `ai.tasks.cancel`；`stats.reports.view` / `stats.reports.export`；`system.upload.view` / `system.upload.create` |
+| 审核人员 | `reviewer` | 审核全部用户提交的内容（通过 / 驳回），必要时直接修改正文；查看生产数据与监控结果 | `all` | `dashboard.view`；`content.*.view` + `content.contents.review` / `content.contents.update` / `content.contents.export`；`media.*.view`；`publish.*.view`；`monitoring.*.view`；`stats.reports.view` |
+| 只读 | `read_only` | 查看全局控制台与报表、导出报表、查看非敏感数据 | `all` | 除 `security.*` 与 `system.settings.view` 外的全部 `*.view`，加 `stats.reports.export` |
 
-- 四个系统用户组由迁移 `0002_seed_permissions.py` 写入，不可删除 / 停用 / 清空权限；自定义用户组由超级管理员创建，`code` 由服务端生成 `custom_{uuid4().hex[:12]}`。
+- 四个系统用户组由迁移 `0002_seed_permissions.py` 写入（含默认数据范围），不可删除 / 停用 / 清空权限；`operator` / `reviewer` / `read_only` 的数据范围可改，`super_admin` 固定 `all`；自定义用户组由超级管理员创建，`code` 由服务端生成 `custom_{uuid4().hex[:12]}`，数据范围缺省 `own`。
+- 用户只由总后台在「系统 → 用户管理」创建并分配用户组（无自助注册）；项目负责人缺省为创建人，总后台可为用户开设项目或转移负责人，项目下的全部数据与统计随之转移。
 - 首次 seed 的超级管理员为 `admin` / `admin123`（环境变量 `SEED_ADMIN_USERNAME` / `SEED_ADMIN_PASSWORD`，启动日志提示修改）。
 - 所有写接口成功后记入 `admin_operation_logs`（审计中间件按「方法 + 路径」映射 `action`），密码 / 密钥 / 令牌不记录。
 - 界面语言 zh-CN / en-US 由 vue-i18n 切换；**生成内容的语言**由 `projects.language` 决定（默认 `zh-CN`），与界面语言无关。
@@ -53,11 +54,12 @@ aicreat 是面向运营 / 内容团队的 **AI 内容生成与效果监控平台
 | 告警 | 链接被删除 / 恢复 / 被改、收录长期未达、AI 任务连续失败、熔断、额度不足、鉴权失败、上游不可用、媒体任务失败、worker 心跳丢失；站内告警中心，webhook / 邮件通道预留 | `alerts` | `/admin/alerts` | `monitoring.alerts.*` | `alerts/Index.vue`、顶栏 `AlertBadge.vue` | [11](./11-link-backfill-and-monitoring.md) |
 | 控制台报表 | 总览 KPI（含环比与迷你趋势）、趋势、分解、榜单、CSV 导出、重算；按日 × 项目 × 维度预聚合 + 今日实时计数兜底 | `daily_stats` | `/admin/stats` | `dashboard.view`、`stats.reports.*` | `Dashboard.vue`、`stats/Reports.vue` | [12](./12-dashboard-reports.md) |
 | 统一 AI 网关接入 | zhiqiapi 适配层：三协议文本、异步 / 同步图片、视频任务；模型目录与价格同步；能力路由（主模型 + 备选链）；重试 / 熔断 / 超时预算；错误分类；额度估算与 `/api/log/token` 对账；健康探测（一键测试）；Mock | `ai_models`、`capability_routes`、`ai_tasks`、`ai_usage_logs` | `/admin/ai/models`、`/admin/ai/routes`、`/admin/ai/tasks`、`/admin/ai/usage`、`/admin/ai/health` | `ai.models.*`、`ai.routes.*`、`ai.tasks.*`、`ai.usage.*` | `ai/Models.vue`、`ai/Routes.vue`、`ai/Tasks.vue`、`ai/Usage.vue` | [08](./08-zhiqiapi-integration.md) |
-| 管理员与权限、系统配置 | 管理员、用户组、权限码、操作日志（沿用 navigation RBAC）；`settings` 表存各模块运行配置 JSON | `admins`、`admin_groups`、`admin_permissions`、`admin_group_permissions`、`admin_operation_logs`、`settings` | `/admin/auth`、`/admin/admins`、`/admin/admin-groups`、`/admin/admin-permissions`、`/admin/admin-operation-logs`、`/admin/settings` | `security.*`、`system.settings.*` | `admins/Index.vue`、`admin-groups/Index.vue`、`admin-operation-logs/Index.vue`、`settings/Index.vue` | [07](./07-admin-rbac.md)、[04](./04-api-spec.md) |
+| 用户系统与权限、系统配置 | 用户（后台账号）、用户组（权限码 + 数据范围 `data_scope`）、操作日志（沿用 navigation RBAC）；按项目负责人隔离数据：普通用户只看本人数据，总后台看全部、可按用户查看与分解；`settings` 表存各模块运行配置 JSON | `admins`、`admin_groups`、`admin_permissions`、`admin_group_permissions`、`admin_operation_logs`、`settings`（归属键 `projects.owner_id`） | `/admin/auth`、`/admin/admins`、`/admin/admin-groups`、`/admin/admin-permissions`、`/admin/admin-operation-logs`、`/admin/settings`、`/admin/projects/owner-options` | `security.*`、`system.settings.*` | `admins/Index.vue`、`admin-groups/Index.vue`、`admin-operation-logs/Index.vue`、`settings/Index.vue`、顶栏 `OwnerSelect.vue` | [07](./07-admin-rbac.md)、[13](./13-user-data-scope.md)、[04](./04-api-spec.md) |
 
 ### 3.1 项目 / 专题
 
 - 项目是所有业务对象的归属单位：`keywords` / `titles` / `contents` / `media_assets` / `publish_links` / `generation_batches` / `ai_tasks` 都带 `project_id`；后台顶栏有全局项目选择器（`store/project.ts`），列表页默认按当前项目过滤。
+- 项目负责人 `projects.owner_id` 是数据隔离的唯一依据：普通用户只能看到自己负责的项目及其下数据；总后台可指定、转移负责人，并在顶栏用户视角切换器中只看某一用户的数据（[13-user-data-scope](./13-user-data-scope.md)）。项目名与 slug 在同一负责人下唯一。
 - 项目携带生成上下文：`industry`、`audience`、`brand_name`、`brand_info`（注入 Prompt 变量 `brand_info`）、`language`、`default_style`（`content_style`）、`default_format`（`markdown` / `html`）、`default_templates_json`（以 `prompt_kind` 为键指定已发布模板 ID）、`default_platform_ids_json`（API 字段去掉 `_json` 后缀）。
 - 项目级默认模型不在 `projects` 表存储，而是 `capability_routes` 的项目覆盖行（`project_id = 项目 ID`），由运营侧 `PUT /admin/projects/{id}/routes` 维护，管理员侧 `/admin/ai/routes` 可设全部列。
 - 状态 `active` / `archived`；仅已归档且无任何下游对象时可物理删除（`DELETE /admin/projects/{id}`，否则 409）。
@@ -256,7 +258,7 @@ flowchart LR
 
 - 站内直接发布 / 托管文章页面（不做自己的内容站，`contents.format` 只决定导出格式）。
 - 自动登录外部平台代发（不做自动化发布；只做手工发布后回填链接）。
-- C 端用户社区、会员 / 支付（平台只有管理员，沿用 navigation 的 RBAC，不含用户 / 帖子 / 评论 / 订单体系）。
+- C 端用户社区、会员 / 支付（平台的用户都是总后台开设的后台账号，沿用 navigation 的 RBAC 并加数据范围，不含帖子 / 评论 / 订单体系）；自助注册、找回密码、第三方登录；项目成员 / 多人共享项目（协作只能由总后台转移负责人，后续扩展见 [13-user-data-scope](./13-user-data-scope.md) §15）。
 - 多语言内容生成（界面保留 zh-CN / en-US 切换，生成内容语言由项目配置，默认中文；系统模板首版仅 `zh-CN`）。
 - 抓取搜索引擎结果页 HTML 判断收录（只走官方 API、联网模型或人工标记）。
 
@@ -267,7 +269,7 @@ flowchart LR
 - 文本生成不做流式输出（`stream` 固定 `false`）；上游图片 `n` 固定 1，多图逐张任务。
 - 告警只做站内通道，`webhook` / `email` 通道配置预留、默认关闭。
 - 不做通用软删除：用状态（`archived` / `discarded` / `deleted`）表达，物理删除仅限草稿类对象。
-- 不做多租户：所有项目共享一套 zhiqiapi 密钥、路由与额度限制。
+- 不做多租户：业务数据按用户隔离，但所有用户共享一套 zhiqiapi 密钥、能力路由全局行、发布平台规则、系统配置与额度限制（不做按用户的额度上限）。
 
 ## 7. 关键名词
 
@@ -300,6 +302,10 @@ flowchart LR
 - **每日预聚合（Daily Stats）**：表 `daily_stats`，按「统计日 × 项目 × 维度 × 维度键」预计算的报表行；快照列从检测历史派生，可复现。
 - **Mock 模式**：`ZHIQI_API_KEY` 为空时的本地假上游，保证无密钥可开发、测试与验收。
 - **管理员 / 用户组 / 权限码 / 操作日志**：沿用 navigation 的 RBAC 四表 + 审计表，权限码 `module.resource.action`。
+- **用户（User）**：一个后台账号（`admins` 一行），界面称「用户」；通过用户组获得权限码与数据范围。
+- **数据范围（Data Scope）**：`admin_groups.data_scope`，`own`（仅本人负责的项目及其下数据）/ `all`（全部数据）；与权限码正交，两者同时满足才能访问（[13-user-data-scope](./13-user-data-scope.md)）。
+- **总后台**：数据范围为 `all` 的用户的视角（`super_admin` 固定属于此类），看全部用户的数据，可用 `owner_id` 切换到某一用户的视角、按用户分解统计。
+- **负责人（Owner）**：`projects.owner_id`，项目及其下全部数据的归属用户；转移负责人即整体转移数据。
 
 ## 8. 状态枚举总表
 
@@ -383,11 +389,12 @@ flowchart LR
 
 | 枚举 | 所在位置 | 取值集合 | 默认 | 权威 |
 | --- | --- | --- | --- | --- |
-| `stats_dimension` | `daily_stats.dimension`、`GET /admin/stats/breakdown?dimension=`（接口另支持 `project`） | `total` / `platform` / `capability` / `model` / `admin` / `seo_engine` / `geo_engine` | `total` | [12](./12-dashboard-reports.md) |
+| `stats_dimension` | `daily_stats.dimension`、`GET /admin/stats/breakdown?dimension=`（接口另支持 `project`、`owner`，二者不落库） | `total` / `platform` / `capability` / `model` / `admin` / `seo_engine` / `geo_engine` | `total` | [12](./12-dashboard-reports.md) |
 | `stats_granularity` | `GET /admin/stats/trends?granularity=` | `day` / `week` / `month` | `day` | [12](./12-dashboard-reports.md) |
 | 总览区间 | `GET /admin/stats/overview?range=` | `today` / `7d` / `30d` | `7d` | [12](./12-dashboard-reports.md) |
 | 榜单类型 | `GET /admin/stats/rankings?type=` | `fastest_indexed` / `most_deleted_platforms` / `top_cost_models` / `top_cost_projects` / `top_failed_models` | — | [12](./12-dashboard-reports.md) |
 | `admin_group_code`（系统组） | `admin_groups.code` | `super_admin` / `operator` / `reviewer` / `read_only`（自定义组为 `custom_*`） | — | [07](./07-admin-rbac.md) |
+| `data_scope` | `admin_groups.data_scope`、`GET /admin/auth/me` 的 `data_scope` | `all` / `own` | `own`（系统组：`super_admin` / `reviewer` / `read_only` 为 `all`） | [13](./13-user-data-scope.md) |
 | 权限类型 | `admin_permissions.type` | `menu`（`*.view`）/ `action` | — | [07](./07-admin-rbac.md) |
 | `operation_action` | `admin_operation_logs.action` | `create` / `update` / `update_status` / `delete` / `execute` / `login` / `logout` / `reset_password` | — | [07](./07-admin-rbac.md) |
 | `locale` | `settings.locale`、界面语言、`projects.language` | `zh-CN` / `en-US`；`settings.locale` 另有 `*`（语言无关） | `zh-CN` | [04](./04-api-spec.md) |

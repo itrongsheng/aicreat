@@ -10,7 +10,7 @@
 
 ```text
 aicreat/
-├── docs/                      # 设计文档（README + 00~12，即本目录）
+├── docs/                      # 设计文档（README + 00~13，即本目录）
 ├── server/                    # FastAPI 后端 + app.worker + app.monitor_worker
 ├── apps/
 │   └── admin/                 # 唯一前端：Vue 3 管理后台（base /admin/，端口 5174）
@@ -88,7 +88,7 @@ server/
 │   ├── models.py                      # 全部 SQLAlchemy ORM 模型（24 张表）+ 顶部以 Literal 声明的状态枚举常量
 │   ├── api/
 │   │   ├── __init__.py                # api_router：汇总 /health 与 admin 子路由，挂载到 /api/v1（静态子路径先于 /{id} 注册）
-│   │   ├── deps.py                    # get_db、get_locale、get_current_admin、require_permission、get_pagination
+│   │   ├── deps.py                    # get_db、get_locale、get_current_admin、require_permission、get_data_scope、get_pagination
 │   │   ├── health.py                  # GET /health（db / redis / zhiqi_mode / worker 心跳，公开）
 │   │   └── admin/                     # 全部业务接口（管理员 JWT + 权限码）
 │   │       ├── __init__.py
@@ -98,7 +98,7 @@ server/
 │   │       ├── admin_permissions.py   # 权限树
 │   │       ├── operation_logs.py      # 操作日志查询
 │   │       ├── settings.py            # settings 读写（按 key 校验 JSON 结构）、runtime 非敏感子集（已登录即可读）
-│   │       ├── projects.py            # 项目 CRUD、归档、项目概览、项目级路由覆盖保存（PUT /{id}/routes）
+│   │       ├── projects.py            # 项目 CRUD、负责人（创建 / 转移、GET /owner-options）、归档、项目概览、项目级路由覆盖保存（PUT /{id}/routes）
 │   │       ├── prompt_templates.py    # Prompt 模板 CRUD、版本、发布、预览渲染
 │   │       ├── keywords.py            # 关键词列表 / 生成 / 导入（JSON 与 CSV 文件两个接口）/ 采用 / 弃用 / 导出
 │   │       ├── titles.py              # 标题列表 / 生成 / 打分 / 采用 / 弃用
@@ -167,6 +167,7 @@ server/
 │   │   ├── __init__.py
 │   │   ├── i18n.py                    # normalize_locale
 │   │   ├── admin_rbac_service.py      # ensure_rbac_seed / has_permission / 管理员与用户组 CRUD / write_audit / list_operation_logs
+│   │   ├── data_scope_service.py      # DataScope / SYSTEM_SCOPE、按项目负责人的范围谓词、get_visible / require_project、owner_options（见 13）
 │   │   ├── settings_service.py        # get_value / set_value / get_config(key) / ensure_default_settings、DEFAULT_SETTINGS、ENV_SEED_PATHS
 │   │   ├── project_service.py         # 项目 CRUD、归档、删除校验、save_project_routes
 │   │   ├── prompt_template_service.py # CRUD、版本、render(template, variables)、resolve_template(kind, project_id, language)
@@ -223,6 +224,7 @@ server/
 ├── tests/                             # pytest
 │   ├── conftest.py                    # SQLite / MySQL 测试会话、Mock 客户端、管理员 token 夹具
 │   ├── test_admin_rbac.py
+│   ├── test_data_scope.py             # 用户数据隔离：列表 / 详情 404 / 引用校验 / owned_by_other / 负责人转移 / 统计范围 / 路由覆盖
 │   ├── test_zhiqi_adapter.py          # 三协议请求体、错误分类、重试、熔断、Mock
 │   ├── test_generation.py             # 关键词 / 标题 / 内容生成与状态机
 │   ├── test_media.py                  # 图片 / 视频任务生命周期与转存
@@ -282,7 +284,7 @@ flowchart LR
 | `app/monitor_worker.py` | `python -m app.monitor_worker` 主循环：启动时在 `lock:bootstrap` 内执行 ensure_*，再 `named_submit("catch_up", aggregate_daily_stats.catch_up)`（补算最近 3 天）；线程池 `TrackedThreadPool(link_check.global_concurrency + index_check.concurrency + 2)`，信号量 `sems = {"link_check", "index_check"}`；每轮心跳 `worker:heartbeat:monitor_worker:{hostname}:{pid}`，`schedule_*` 入队、`run_link_checks.drain` / `run_index_checks.drain`、`drain_recompute`、每日聚合与告警评估；休眠 `MONITOR_POLL_INTERVAL_SECONDS` |
 | `app/models.py` | 24 张表的 ORM 定义与 `Literal` 枚举常量（见 [03-data-model](./03-data-model.md)） |
 | `app/api/__init__.py` | 路由汇总与前缀挂载（见 §2.4） |
-| `app/api/deps.py` | `get_db`（会话）、`get_locale`（`lang` 参数 / `Accept-Language`，经 `services.i18n.normalize_locale`）、`get_current_admin`（解析 `aud=admin` JWT，校验 `ver` = `admins.token_version`、管理员 `is_active=1` 且所属用户组 `is_active=1`，任一不满足返回 401，用户组停用时为「管理员用户组已停用」；见 [07-admin-rbac](./07-admin-rbac.md) §7.2）、`require_permission(code)`（校验权限，不满足返回 403「无权执行此操作」、`data={"permission": code}`；通过后写 `request.state.permission_code`）、`get_pagination`（`page` / `page_size`，默认 20、最大 100） |
+| `app/api/deps.py` | `get_db`（会话）、`get_locale`（`lang` 参数 / `Accept-Language`，经 `services.i18n.normalize_locale`）、`get_current_admin`（解析 `aud=admin` JWT，校验 `ver` = `admins.token_version`、管理员 `is_active=1` 且所属用户组 `is_active=1`，任一不满足返回 401，用户组停用时为「管理员用户组已停用」；见 [07-admin-rbac](./07-admin-rbac.md) §7.2）、`require_permission(code)`（校验权限，不满足返回 403「无权执行此操作」、`data={"permission": code}`；通过后写 `request.state.permission_code`）、`get_data_scope`（读所属用户组 `data_scope` 与查询参数 `owner_id`，返回 `DataScope`，见 [13-user-data-scope](./13-user-data-scope.md) §9.1）、`get_pagination`（`page` / `page_size`，默认 20、最大 100） |
 | `app/api/health.py` | `GET /api/v1/health`（公开）：返回 `status` / `db` / `redis` / `zhiqi_mode` / `workers`（`SCAN worker:heartbeat:*` 汇总）/ `warnings[]` / `version`；db / redis 不可用返回 503，worker 不活跃仅 `degraded` |
 | `app/api/admin/*` | 全部业务接口，每个文件一个资源；只做入参校验、权限声明与调用 service，不写业务规则 |
 | `app/core` | 配置、数据库、Redis、锁、安全、存储、频控、响应、异常、权限定义、SSRF 安全抓取、指纹、URL 工具 |
@@ -423,8 +425,9 @@ api_router.include_router(admin)
 | --- | --- | --- |
 | `i18n.py` | `normalize_locale`（`zh-CN` / `en-US`，非法值回退 `zh-CN`） | `api/deps.get_locale` |
 | `admin_rbac_service.py` | `ensure_rbac_seed`、`has_permission`、管理员 / 用户组 CRUD（自动补齐同资源 `view` 与 `PERMISSION_DEPENDENCIES`）、`write_audit`、`list_operation_logs` | auth / admins / admin_groups / admin_permissions / operation_logs 路由、审计中间件 |
+| `data_scope_service.py` | `DataScope` / `SYSTEM_SCOPE`、`visible_project_ids` 与各表范围谓词（`scope_by_project` / `scope_media` / `scope_templates` / `scope_routes` / `scope_link_children` / `scope_usage_logs` / `scope_operation_logs`）、`get_visible`（不可见即 404）、`require_project`、`is_visible`、`owner_options`（[13-user-data-scope](./13-user-data-scope.md) §9.2） | `api/deps.get_data_scope`、所有读写受数据范围约束表的 service |
 | `settings_service.py` | `get_value` / `set_value` / `get_config(key)`（Redis 缓存 + 默认值深合并）、`ensure_default_settings`（`DEFAULT_SETTINGS[key]` 深合并 `ENV_SEED_PATHS` 派生值，键不存在才插入） | settings 路由、全部读取配置的 service / task |
-| `project_service.py` | 项目 CRUD、归档 / 恢复、删除校验、`save_project_routes` | projects 路由 |
+| `project_service.py` | 项目 CRUD、负责人规则（创建缺省本人、总后台转移，提交后清 `cache:stats:*`）、归档 / 恢复、删除校验、`save_project_routes` | projects 路由 |
 | `prompt_template_service.py` | 模板 CRUD、版本、发布、`render(template, variables)`、`resolve_template(kind, project_id, language)` | prompt_templates 路由、`ai_task_service` |
 | `keyword_service.py` / `title_service.py` | 归一化、去重、导入、打分、`adopt` / `discard` / `restore` 状态流转；`title_service.title_dedup_key(title)` 为标题去重键（NFKC → 去标点与空白 → 小写，**不**剥离站点后缀，见 [09-generation-pipeline](./09-generation-pipeline.md) §7.3），生成写入去重与 `duplicate_title` 质量标记共用；与 `fingerprint.normalize_title`（先剥离站点后缀，用于链接检测比对页面标题）不同，二者不互相复用 | keywords / titles 路由、`ai_task_service` |
 | `content_service.py` | 内容状态机 `transition(content, action, actor)`（非法流转抛 409；进入 `generating` / `archived` 写 `prev_status`，离开时清空）、版本写入（版本化字段变更同事务写 `content_versions`，`content_hash` 与当前版本相同不建版本，达 `rewrite.max_versions` 时先自动裁剪）、质量规则（`quality_score` / `risk_flags_json`）、素材绑定、导出 | contents 路由、`ai_task_service` |
@@ -475,9 +478,9 @@ api_router.include_router(admin)
 | 位置 | 内容 | 说明 |
 | --- | --- | --- |
 | `migrations/versions/0001_initial.py` | 全部 24 张表、索引与唯一约束 | 表定义见 [03-data-model](./03-data-model.md) |
-| `migrations/versions/0002_seed_permissions.py` | 权限码（`PERMISSION_CODES`）与系统用户组（`super_admin` / `operator` / `reviewer` / `read_only`） | 只写权限与组；新增权限码后由启动时 `ensure_rbac_seed` 补齐 |
+| `migrations/versions/0002_seed_permissions.py` | 权限码（`PERMISSION_CODES`）与系统用户组（`super_admin` / `operator` / `reviewer` / `read_only`，含默认 `data_scope`） | 只写权限与组；新增权限码后由启动时 `ensure_rbac_seed` 补齐 |
 | 启动钩子（`main.py`、两个 worker） | `lock:bootstrap` 内 `ensure_rbac_seed` → `ensure_default_settings` → `ensure_default_routes` | 全部幂等（`INSERT … ON DUPLICATE KEY UPDATE id=id` 或逐条 `IntegrityError` 回滚） |
-| `seeds/seed.py` | 超管 `admin/admin123`（`SEED_ADMIN_USERNAME` / `SEED_ADMIN_PASSWORD`）、示例项目、系统 Prompt 模板（`sys_*`，`zh-CN`）、默认发布平台 | 幂等 upsert；本机在 `server/` 目录执行 `python seeds/seed.py`（依赖 `pip install -e .` 使 `app` 可导入，见 §1.2）；docker 内同样是 `python seeds/seed.py`，发布流程为 `docker compose run --rm server sh -c "alembic upgrade head && python seeds/seed.py"`（见 §5） |
+| `seeds/seed.py` | 超管 `admin/admin123`（`SEED_ADMIN_USERNAME` / `SEED_ADMIN_PASSWORD`）、示例项目（负责人为该超管）、系统 Prompt 模板（`sys_*`，`zh-CN`）、默认发布平台 | 幂等 upsert；本机在 `server/` 目录执行 `python seeds/seed.py`（依赖 `pip install -e .` 使 `app` 可导入，见 §1.2）；docker 内同样是 `python seeds/seed.py`，发布流程为 `docker compose run --rm server sh -c "alembic upgrade head && python seeds/seed.py"`（见 §5） |
 | `scripts/integration_smoke.py` | Mock 模式端到端冒烟：登录 → 关键词 → 标题 → 内容 → 图片 → 回填 → 检测 → 报表。参数 `--base-url`（API 根地址，不带 `/api/v1`，缺省 `http://127.0.0.1:8100`）、`--username` / `--password`（缺省取 `SEED_ADMIN_USERNAME` / `SEED_ADMIN_PASSWORD`；预发改密后用参数传入新密码）；本机经根脚本 `smoke:api` 运行，compose 环境在容器内运行 `docker compose exec server python scripts/integration_smoke.py --base-url http://127.0.0.1:8000` | 检测步骤断言 SEO / GEO 结果非 `unknown`，并另回填一条返回 404 的公网 URL，断言基线 `suspected_deleted`、手动检测后 `deleted`、产生 `link_deleted` 告警且可确认、解决；报表步骤断言 `seo_index_rate` / `geo_cite_rate` 非 null 且 > 0；恢复分支（`link_restored`）不在脚本内，由后端集成测试覆盖（[11-link-backfill-and-monitoring](./11-link-backfill-and-monitoring.md) §16.2 删除 / 恢复闭环）；用法见 [06-getting-started](./06-getting-started.md) |
 | `tests/conftest.py` | 测试会话（SQLite 或 `DATABASE_URL` 指向的 MySQL）、`reset_client()` 后注入 `MockZhiqiClient`、管理员 token 夹具 | 测试文件按领域命名 `test_<domain>.py` |
 
@@ -597,6 +600,7 @@ apps/admin/
         ├── ThemeSwitch.vue
         ├── ToolbarSelect.vue
         ├── ProjectSelect.vue
+        ├── OwnerSelect.vue        # 顶栏用户视角切换器（仅数据范围 all 的总后台显示）
         ├── StatusTag.vue          # 统一状态 → 颜色 / 文案映射（读 shared 枚举）
         ├── KpiCard.vue
         ├── TrendChart.vue         # echarts 折线 / 柱状封装
@@ -620,15 +624,15 @@ apps/admin/
 | 模块 | 职责 |
 | --- | --- |
 | `router` | 路由表（§3.3）、登录守卫（无 token → `/login?redirect=`）、权限守卫（`meta.permission` 不满足 → `/403`）、`createWebHistory("/admin/")` |
-| `store/auth` | `token`（localStorage）、`admin`、`permissions`；刷新页面时调 `GET /admin/auth/me` 重建；401 时清空 |
+| `store/auth` | `token`（localStorage）、`admin`（含 `data_scope`）、`permissions`；刷新页面时调 `GET /admin/auth/me` 重建；401 时清空 |
 | `store/theme` | 明暗主题，持久化到 localStorage |
-| `store/project` | 当前项目 id（顶栏 `ProjectSelect`），持久化；各业务页列表默认带 `project_id` 筛选 |
+| `store/project` | 当前项目 id（顶栏 `ProjectSelect`）与总后台的用户视角 `ownerId`（顶栏 `OwnerSelect`），均持久化；各业务页列表默认带 `project_id` 筛选，`ownerId > 0` 时 GET 请求由 `client.ts` 附加 `owner_id` |
 | `store/alerts` | `open_count` 未处理告警数；仅 `usePermission().has('monitoring.alerts.view')` 为真时每 60s 调 `GET /admin/alerts/summary` |
 | `i18n` | vue-i18n 实例与 `zh-CN` / `en-US` 界面词条；请求带 `lang` 参数 |
 | `api` | 统一封装后端调用（§3.4）；`client.ts` 注入 `Authorization: Bearer`、`lang`，拆解 `{code, message, data}`，`code != 0` 时抛错并提示 |
-| `layouts/Layout.vue` | 侧边菜单显式配置（每项绑定一个 `*.view` 权限码并按其过滤）、面包屑、顶栏（项目选择器、`AlertBadge`、`LangSwitch`、`ThemeSwitch`、当前管理员菜单） |
+| `layouts/Layout.vue` | 侧边菜单显式配置（每项绑定一个 `*.view` 权限码并按其过滤）、面包屑、顶栏（用户视角切换器 `OwnerSelect`（仅总后台）、项目选择器、`AlertBadge`、`LangSwitch`、`ThemeSwitch`、当前用户菜单与范围标签「总后台」/「我的数据」）、用户视角提示条 |
 | `directives/permission.ts` | `v-permission="'content.keywords.generate'"`：无权限时移除元素 |
-| `composables` | `usePermission`（`has` / `hasAny`）、`usePolling`（任务 / 批次轮询，页面不可见时暂停）、`useProject` |
+| `composables` | `usePermission`（`has` / `hasAny` / `isAllScope`）、`usePolling`（任务 / 批次轮询，页面不可见时暂停）、`useProject` |
 | `utils` | 时间 / 额度 / 金额 / 时长格式化，Markdown 渲染与清理，CSV / MD / HTML 文件下载 |
 | `views` | 页面级组件，按资源分目录 `kebab-case/Index.vue`；同资源的详情 / 编辑页为 `Detail.vue` / `Editor.vue` |
 | `components` | 跨页面复用的 UI 组件（§3.6） |
@@ -701,12 +705,12 @@ router.beforeEach(async (to) => {
 
 | 文件 | 后端前缀 | 函数（节选） |
 | --- | --- | --- |
-| `client.ts` | `/api/v1` | `request<T>()`：注入 `Authorization: Bearer <token>` 与 `lang`，解包 `{code, message, data}`；`code != 0` 抛 `ApiError(code, message, data)`；401 → 清登录态并跳转 `/login`（登录请求本身的 401 交由登录页展示）；403 → `data.permission` 存在时提示「无权执行此操作」并刷新权限，`data` 为 null（安全规则拒绝）时直接展示后端 `message`、不刷新权限（[07-admin-rbac](./07-admin-rbac.md) §9.6）；文件下载走 `responseType: "blob"`；`recompute` 等长请求可单独传 `timeout` |
+| `client.ts` | `/api/v1` | `request<T>()`：注入 `Authorization: Bearer <token>` 与 `lang`，`store/project.ownerId > 0` 时为 GET 请求附加 `owner_id`（请求已显式携带时不覆盖，[13-user-data-scope](./13-user-data-scope.md) §12.2），解包 `{code, message, data}`；`code != 0` 抛 `ApiError(code, message, data)`；401 → 清登录态并跳转 `/login`（登录请求本身的 401 交由登录页展示）；403 → `data.permission` 存在时提示「无权执行此操作」并刷新权限，`data` 为 null（安全规则拒绝）时直接展示后端 `message`、不刷新权限（[07-admin-rbac](./07-admin-rbac.md) §9.6）；文件下载走 `responseType: "blob"`；`recompute` 等长请求可单独传 `timeout` |
 | `auth.ts` | `/admin/auth` | `login`、`me`、`logout`、`changePassword`、`siteInfo` |
 | `admins.ts` | `/admin/admins`、`/admin/admin-operation-logs` | `listAdmins`、`getAdmin`、`createAdmin`、`updateAdmin`、`setAdminStatus`、`resetPassword`、`listOperationLogs` |
 | `groups.ts` | `/admin/admin-groups`、`/admin/admin-permissions` | `listGroups`、`getGroup`、`createGroup`、`updateGroup`、`deleteGroup`、`saveGroupPermissions`、`listPermissions`、`permissionTree` |
 | `settings.ts` | `/admin/settings` | `listSettings`、`getSetting`（`GET /{key}?locale=`）、`saveSetting`（`PUT /{key}`）、`saveSettings`（批量 `PUT /admin/settings`）、`runtime`（`GET /runtime`，已登录即可） |
-| `projects.ts` | `/admin/projects` | CRUD、`archive` / `unarchive`、`overview`、`saveRoutes` |
+| `projects.ts` | `/admin/projects` | CRUD、`ownerOptions`（`GET /owner-options`）、`archive` / `unarchive`、`overview`、`saveRoutes` |
 | `promptTemplates.ts` | `/admin/prompt-templates` | CRUD、`versions`、`publish`、`archive`、`duplicate`、`preview` |
 | `keywords.ts` | `/admin/keywords` | CRUD、`generate`、`importKeywords`、`importFile`、`adopt` / `discard` / `restore`、`batchStatus`、`exportKeywords` |
 | `titles.ts` | `/admin/titles` | CRUD、`generate`、`score`、`adopt` / `discard` / `restore`、`batchStatus` |
@@ -727,11 +731,11 @@ router.beforeEach(async (to) => {
 
 | 文件 | 导出 | 说明 |
 | --- | --- | --- |
-| `store/auth.ts` | `useAuthStore`：`token`、`admin`、`permissions`、`login()`、`fetchMe()`、`logout()` | `permissions` 为字符串数组（权限码），`super_admin` 组成员同样以显式权限码判断 |
+| `store/auth.ts` | `useAuthStore`：`token`、`admin`、`permissions`、`isAllScope`、`login()`、`fetchMe()`、`logout()` | `permissions` 为字符串数组（权限码），`super_admin` 组成员同样以显式权限码判断；`isAllScope` = `admin.data_scope === "all"`（总后台） |
 | `store/theme.ts` | `useThemeStore`：`mode`、`toggle()` | `dark` 时给 `html` 加 `dark` class（Element Plus 暗色变量） |
-| `store/project.ts` | `useProjectStore`：`currentId`、`projects`、`setCurrent()`、`load()` | 列表来自 `GET /admin/projects?status=active` |
+| `store/project.ts` | `useProjectStore`：`currentId`、`projects`、`setCurrent()`、`load()`、`ownerId`、`owners`、`setOwner()`、`loadOwners()` | 项目列表来自 `GET /admin/projects?status=active`（带 `owner_id`）；`owners` 来自 `GET /admin/projects/owner-options`；切换用户时 `currentId` 重置为 0；登录 / 退出时清空 `ownerId` 与 `currentId` |
 | `store/alerts.ts` | `useAlertsStore`：`openCount`、`start()`、`stop()` | `Layout.vue` 挂载时按权限启动 |
-| `composables/usePermission.ts` | `has(code)`、`hasAny(codes)` | 读 `useAuthStore().permissions` |
+| `composables/usePermission.ts` | `has(code)`、`hasAny(codes)`、`isAllScope` | 读 `useAuthStore().permissions` / `isAllScope` |
 | `composables/usePolling.ts` | `usePolling(fn, { interval: 3000 })` → `start` / `stop` / `running` | `document.visibilityState !== "visible"` 时暂停；任务到终态时调用方 `stop()` |
 | `composables/useProject.ts` | `projectId`（computed）、`requireProject()` | 生成类页面无当前项目时提示先选择项目 |
 | `utils/format.ts` | `formatDateTime`（UTC ISO → 本地）、`formatQuota`、`formatCny`、`formatDuration` | 金额两位小数；额度千分位 |
@@ -744,7 +748,8 @@ router.beforeEach(async (to) => {
 | --- | --- | --- |
 | `LangSwitch.vue` / `ThemeSwitch.vue` | 语言 / 主题切换 | `Layout.vue`、`Login.vue` |
 | `ToolbarSelect.vue` | 列表页筛选下拉（状态 / 平台 / 能力等枚举） | 各列表页 |
-| `ProjectSelect.vue` | 项目选择器（顶栏全局 + 表单内） | `Layout.vue`、生成表单 |
+| `ProjectSelect.vue` | 项目选择器（顶栏全局 + 表单内；只列可见项目，总后台选了用户时只列该用户的项目） | `Layout.vue`、生成表单 |
+| `OwnerSelect.vue` | 用户视角切换器（`GET /admin/projects/owner-options`，首项「全部用户」；仅 `isAllScope && has("content.projects.view")` 时渲染） | `Layout.vue` 顶栏、`projects/Index.vue` 负责人字段 |
 | `StatusTag.vue` | 状态枚举 → `el-tag` 颜色 / i18n 文案（读 `@aicreat/shared` 枚举） | 所有带状态列的表格 |
 | `KpiCard.vue` / `TrendChart.vue` | KPI 卡片、echarts 折线 / 柱状封装 | `Dashboard.vue`、`stats/Reports.vue`、`ai/Usage.vue` |
 | `MarkdownEditor.vue` / `MarkdownPreview.vue` | 正文编辑与预览 | `contents/Editor.vue`、`prompt-templates/Editor.vue` |
@@ -799,8 +804,8 @@ packages/shared/                       # @aicreat/shared
 
 | 文件 | 内容 |
 | --- | --- |
-| `types.ts` | `AdminGroupRef`、`AdminProfile`、`AdminItem`、`AdminGroupItem`、`AdminPermissionItem`、`AdminOperationLogItem`（管理员、用户组、权限与操作日志，定义见 [07-admin-rbac](./07-admin-rbac.md) §9.7）、`Setting`、`Project`、`PromptTemplate`、`GenerationBatch`、`Keyword`、`Title`、`Content`、`ContentVersion`、`MediaAsset`、`AiTask`、`AiTaskSummary`、`BatchTaskSummary`、`AiModel`、`CapabilityRoute`、`AiUsageLog`、`Platform`、`PublishLink`、`LinkCheck`、`IndexCheck`、`Alert`、`DailyStats`、`StatsOverview`（统计总览响应 `meta` / `kpis` / `compare` / `breakdowns` / `series`；`kpis` 含任务级 `task_success_rate`，`breakdowns` 含 `cost_by_capability[]` 与 `cost_by_model[]`，见 [04-api-spec](./04-api-spec.md) §7.14、[12-dashboard-reports](./12-dashboard-reports.md) §9.1）、`TrendPoint`、`BreakdownRow`、`RankingRow`（趋势 / 分解 / 榜单响应的行结构，见 12 §9.2～§9.4），以及通用 `ApiResponse<T>`、`Page<T>`；字段与 [04-api-spec](./04-api-spec.md) 的响应一致（如 `PublishLink.seo_status` / `geo_status` 为解码后的对象）。接口专属的响应字段同样在此声明：文本生成接口（关键词 / 标题 / 内容系列，04 §6.9、§6.10、§6.11）与图片 / 视频生成接口（04 §6.13）响应的可选 `quota_warning?: {scope, limit, used, percent}`（`scope` ∈ `daily` / `project_monthly`；单个对象，一次请求最多一个，04 §5.2）；素材详情 `GET /admin/media/assets/{id}` 的 `references?: {cover_of, bound_content_id, referenced_by_asset_ids: {id, status}[], count}`（仅详情返回、列表不计算，04 §6.13）；能力路由写接口 `POST /admin/ai/routes`、`PUT /admin/ai/routes/{id}` 的响应为路由对象另附 `warnings: {loc, msg, type, input}[]`（每个 `is_available=0` 的主 / 备模型一项，`type=model_unavailable`，结构同 400 校验错误项，无警告为 `[]`，04 §6.15）；根任务摘要 `BatchTaskSummary`（`GET /admin/generation-batches/{id}` 的 `tasks[]` 项）与 `AiTaskSummary`（`GET /admin/contents/{id}/task`、`GET /admin/media/assets/{id}/task` 的返回，内容详情 `pending_tasks[]` 与素材详情 `task` 同结构）都含 `model_override: string \| null`（取根任务 `input_json.model`，文本与媒体相同，媒体不使用 `params.model`；前端以其非空识别使用了请求级覆盖模型） |
-| `enums.ts` | 蓝本为 [00-overview](./00-overview.md) 的状态枚举总表：`KEYWORD_STATUS`、`TITLE_STATUS`、`CONTENT_STATUS`、`BATCH_STATUS`、`AI_TASK_STATUS`、`MEDIA_STATUS`、`LINK_ALIVE_STATUS`、`ERROR_CATEGORY`、`ALERT_TYPE` / `ALERT_STATUS` / `ALERT_SEVERITY`、`PROTOCOL`、`HEALTH_STATUS` / `BREAKER_STATE`、`SEO_INDEX_STATUS` / `GEO_CITE_STATUS`、`PROMPT_KIND` / `PROMPT_STATUS`、`CONTENT_STYLE`、`VERSION_SOURCE`、`REWRITE_MODE` / `REWRITE_SCOPE`、`KEYWORD_INTENT` / `KEYWORD_TYPE` / `KEYWORD_SOURCE` / `TITLE_SOURCE`、`MEDIA_KIND` / `MEDIA_USAGE_TYPE` / `MEDIA_SOURCE`、`MODALITY`、`AI_TASK_OPERATION` / `AI_TASK_TRIGGER_TYPE` / `AI_TASK_TARGET_TYPE`、`ALERT_TARGET_TYPE`、`CHECK_TYPE`（`baseline` / `scheduled` / `manual` / `retry`；`index_checks` 只用其中 `scheduled` / `manual`）、`LINK_CHECK_RULE`、`INDEX_KIND` / `SEO_ENGINE` / `GEO_ENGINE`、`INDEX_MATCH_MODE`、`SEO_PROVIDER` / `GEO_PROVIDER`、`PROJECT_STATUS`、`STATS_DIMENSION` / `STATS_GRANULARITY`、`ADMIN_GROUP_CODE`、`OPERATION_ACTION`。常量名 = 枚举名大写，同时导出联合类型（`KeywordStatus` 等） |
+| `types.ts` | `AdminGroupRef`、`AdminProfile`、`AdminItem`、`AdminGroupItem`、`AdminPermissionItem`、`AdminOperationLogItem`（管理员、用户组、权限与操作日志，定义见 [07-admin-rbac](./07-admin-rbac.md) §9.7；前三者与用户组均含 `data_scope`）、`OwnerOption`（负责人候选，[13-user-data-scope](./13-user-data-scope.md) §12.4）、`Setting`、`Project`、`PromptTemplate`、`GenerationBatch`、`Keyword`、`Title`、`Content`、`ContentVersion`、`MediaAsset`、`AiTask`、`AiTaskSummary`、`BatchTaskSummary`、`AiModel`、`CapabilityRoute`、`AiUsageLog`、`Platform`、`PublishLink`、`LinkCheck`、`IndexCheck`、`Alert`、`DailyStats`、`StatsOverview`（统计总览响应 `meta` / `kpis` / `compare` / `breakdowns` / `series`；`kpis` 含任务级 `task_success_rate`，`breakdowns` 含 `cost_by_capability[]` 与 `cost_by_model[]`，见 [04-api-spec](./04-api-spec.md) §7.14、[12-dashboard-reports](./12-dashboard-reports.md) §9.1）、`TrendPoint`、`BreakdownRow`、`RankingRow`（趋势 / 分解 / 榜单响应的行结构，见 12 §9.2～§9.4），以及通用 `ApiResponse<T>`、`Page<T>`；字段与 [04-api-spec](./04-api-spec.md) 的响应一致（如 `PublishLink.seo_status` / `geo_status` 为解码后的对象）。接口专属的响应字段同样在此声明：文本生成接口（关键词 / 标题 / 内容系列，04 §6.9、§6.10、§6.11）与图片 / 视频生成接口（04 §6.13）响应的可选 `quota_warning?: {scope, limit, used, percent}`（`scope` ∈ `daily` / `project_monthly`；单个对象，一次请求最多一个，04 §5.2）；素材详情 `GET /admin/media/assets/{id}` 的 `references?: {cover_of, bound_content_id, referenced_by_asset_ids: {id, status}[], count}`（仅详情返回、列表不计算，04 §6.13）；能力路由写接口 `POST /admin/ai/routes`、`PUT /admin/ai/routes/{id}` 的响应为路由对象另附 `warnings: {loc, msg, type, input}[]`（每个 `is_available=0` 的主 / 备模型一项，`type=model_unavailable`，结构同 400 校验错误项，无警告为 `[]`，04 §6.15）；根任务摘要 `BatchTaskSummary`（`GET /admin/generation-batches/{id}` 的 `tasks[]` 项）与 `AiTaskSummary`（`GET /admin/contents/{id}/task`、`GET /admin/media/assets/{id}/task` 的返回，内容详情 `pending_tasks[]` 与素材详情 `task` 同结构）都含 `model_override: string \| null`（取根任务 `input_json.model`，文本与媒体相同，媒体不使用 `params.model`；前端以其非空识别使用了请求级覆盖模型） |
+| `enums.ts` | 蓝本为 [00-overview](./00-overview.md) 的状态枚举总表：`KEYWORD_STATUS`、`TITLE_STATUS`、`CONTENT_STATUS`、`BATCH_STATUS`、`AI_TASK_STATUS`、`MEDIA_STATUS`、`LINK_ALIVE_STATUS`、`ERROR_CATEGORY`、`ALERT_TYPE` / `ALERT_STATUS` / `ALERT_SEVERITY`、`PROTOCOL`、`HEALTH_STATUS` / `BREAKER_STATE`、`SEO_INDEX_STATUS` / `GEO_CITE_STATUS`、`PROMPT_KIND` / `PROMPT_STATUS`、`CONTENT_STYLE`、`VERSION_SOURCE`、`REWRITE_MODE` / `REWRITE_SCOPE`、`KEYWORD_INTENT` / `KEYWORD_TYPE` / `KEYWORD_SOURCE` / `TITLE_SOURCE`、`MEDIA_KIND` / `MEDIA_USAGE_TYPE` / `MEDIA_SOURCE`、`MODALITY`、`AI_TASK_OPERATION` / `AI_TASK_TRIGGER_TYPE` / `AI_TASK_TARGET_TYPE`、`ALERT_TARGET_TYPE`、`CHECK_TYPE`（`baseline` / `scheduled` / `manual` / `retry`；`index_checks` 只用其中 `scheduled` / `manual`）、`LINK_CHECK_RULE`、`INDEX_KIND` / `SEO_ENGINE` / `GEO_ENGINE`、`INDEX_MATCH_MODE`、`SEO_PROVIDER` / `GEO_PROVIDER`、`PROJECT_STATUS`、`STATS_DIMENSION` / `STATS_GRANULARITY`、`ADMIN_GROUP_CODE`、`DATA_SCOPE`、`OPERATION_ACTION`。常量名 = 枚举名大写，同时导出联合类型（`KeywordStatus` 等） |
 | `constants.ts` | `API_PREFIX = "/api/v1"`、`DEFAULT_PAGE_SIZE = 20`、`MAX_PAGE_SIZE = 100`、`SUPPORTED_LOCALES = ["zh-CN", "en-US"]`、`UPLOAD_LIMITS = { image_mb: 10, video_mb: 200 }`（前端预检默认值，与 `MAX_IMAGE_SIZE_MB` / `MAX_VIDEO_SIZE_MB` 默认一致，以后端为准）、`IMAGE_RESOLUTIONS`、`ASPECT_RATIOS`、`VIDEO_RESOLUTIONS`、`CAPABILITIES`、`BUSINESS_CODES` |
 
 `enums.ts` 与 `constants.ts` 的写法：
@@ -853,7 +858,7 @@ export const BUSINESS_CODES = {
 | URL 资源 | `kebab-case` 复数；对象级动作 `POST /{resource}/{id}/{action}`，集合级动作 `POST /{resource}/{action}` | `/admin/prompt-templates`、`POST /admin/links/{id}/index-check`、`POST /admin/keywords/batch-status` |
 | 权限码 | `module.resource.action`；每个资源一个 `menu` 型 `*.view` 与若干 `action` 型 | `content.keywords.generate`、`monitoring.alerts.handle` |
 | 环境变量 | 大写 `SNAKE_CASE`，按子系统前缀分组 | `ZHIQI_API_KEY`、`MONITOR_CONCURRENCY`、`SEO_GSC_SITE_URL` |
-| Redis 键 | 冒号分段，首段为类别 | `queue:ai_tasks`、`lock:monitor:link_check:{link_id}`、`cache:stats:overview:{project_id}:{range}` |
+| Redis 键 | 冒号分段，首段为类别 | `queue:ai_tasks`、`lock:monitor:link_check:{link_id}`、`cache:stats:overview:{scope_key}:{project_id}:{range}` |
 | Python 模块 | `snake_case.py`；路由文件 = 资源复数；service = `<resource>_service.py`；task = 动词短语 | `generation_batches.py`、`link_check_service.py`、`schedule_link_checks.py` |
 | Python 类 / 函数 | 类 `PascalCase`、函数 `snake_case`；Pydantic 请求 `XxxBody` / 响应 `XxxOut`；dataclass 结果 `XxxResult` | `LinkBackfillBody`、`ImageSubmitResult` |
 | Vue 页面 | 目录 `kebab-case`，文件 `Index.vue` / `Detail.vue` / `Editor.vue`；单页面资源用具名文件 | `views/prompt-templates/Editor.vue`、`views/media/Assets.vue` |
@@ -903,7 +908,7 @@ export const BUSINESS_CODES = {
 | 1 | `server/app/models.py`、`server/migrations/versions/000N_<name>.py` | ORM 模型 + Alembic 迁移（含索引、`created_at` / `updated_at`） |
 | 2 | `server/app/schemas/<resource>.py` | `XxxBody` / `XxxOut`，JSON 列去 `_json` 后缀 |
 | 3 | `server/app/services/<resource>_service.py` | 业务逻辑、事务边界、缓存与计数 |
-| 4 | `server/app/api/admin/<resource>.py`、`server/app/api/__init__.py` | 路由（静态子路径先于 `/{id}`）、`admin.include_router(..., prefix="/<kebab>")` |
+| 4 | `server/app/api/admin/<resource>.py`、`server/app/api/__init__.py` | 路由（静态子路径先于 `/{id}`）、`admin.include_router(..., prefix="/<kebab>")`；资源属于业务数据时路由声明 `get_data_scope`、service 以 `scope` 为必填参数，并把前缀加入 `SCOPED_ROUTE_PREFIXES`（[13-user-data-scope](./13-user-data-scope.md) §9.3），表须能经 `project_id` 归属到项目负责人 |
 | 5 | `server/app/core/admin_permissions.py` | `_resource("module", "resource", "名称", [(action, 说明)…], sort)`；启动时 `ensure_rbac_seed` 自动补齐权限行；默认组规则按 `DEFAULT_GROUP_PERMISSIONS` 自动覆盖 |
 | 6 | `server/app/main.py` | `AUDIT_TARGET_TYPES` 增加「路由前缀 → target_type」 |
 | 7 | `packages/shared/src/types.ts`、`enums.ts` | 契约接口与枚举（同步 `models.py` 的 `Literal`） |

@@ -638,9 +638,9 @@ flowchart LR
 | 来源 | 内容 | 幂等方式 | 执行时机 |
 | --- | --- | --- | --- |
 | `migrations/versions/0001_initial.py` | 全部 24 张表与索引 | Alembic 版本表 | `alembic upgrade head` |
-| `migrations/versions/0002_seed_permissions.py` | 权限码（`admin_permissions`）与系统用户组 `super_admin` / `operator` / `reviewer` / `read_only` | `INSERT … ON DUPLICATE KEY UPDATE` | 同上 |
+| `migrations/versions/0002_seed_permissions.py` | 权限码（`admin_permissions`）与系统用户组 `super_admin` / `operator` / `reviewer` / `read_only`（含默认数据范围 `data_scope`，见 [13-user-data-scope](./13-user-data-scope.md)） | `INSERT … ON DUPLICATE KEY UPDATE` | 同上 |
 | `ensure_rbac_seed` / `ensure_default_settings` / `ensure_default_routes` | 权限码补齐、9 个配置键默认值（`generation_config` / `media_config` / `monitoring_config` / `geo_engines` / `seo_providers` / `alert_config` / `ai_routing_config` / `stats_config` / `system_info`，含环境变量派生初值，键清单见 [03-data-model](./03-data-model.md)）、8 条全局 `capability_routes` | 「键不存在则插入」，在 `lock:bootstrap` 内 | 每次 server / worker / monitor-worker 启动 |
-| `seeds/seed.py` | 超管（`SEED_ADMIN_USERNAME` / `SEED_ADMIN_PASSWORD`）、示例项目、系统 Prompt 模板（`sys_*`，zh-CN）、默认平台与删除特征规则 | upsert（已改密的超管不会被覆盖） | 发布步骤 |
+| `seeds/seed.py` | 超管（`SEED_ADMIN_USERNAME` / `SEED_ADMIN_PASSWORD`）、示例项目（负责人为该超管）、系统 Prompt 模板（`sys_*`，zh-CN）、默认平台与删除特征规则 | upsert（已改密的超管不会被覆盖） | 发布步骤 |
 
 ### 8.2 命令
 
@@ -662,6 +662,7 @@ alembic revision --autogenerate -m "add_xxx"
 - 大表（`ai_tasks`、`link_checks`、`index_checks`、`ai_usage_logs`、`daily_stats`）加索引用 MySQL 8 在线 DDL（`ALGORITHM=INPLACE, LOCK=NONE`），避免长时间锁表；上线前用生产快照在预发演练并记录耗时。
 - `settings` 配置键带 `version` 字段：新版本新增键或字段时靠深合并默认值兼容；需要改变语义时在 `ensure_default_settings` 中按 `version` 升级并保留管理员改动，不直接覆盖。
 - `alembic autogenerate` 对 `TEXT` JSON 列与 `DECIMAL` 精度可能产生无意义的差异，提交前人工审阅迁移脚本。
+- 用户系统（数据范围）的列与索引已并入 `0001_initial` / `0002_seed_permissions`；若数据库按此前的文档版本建成，按 [13-user-data-scope](./13-user-data-scope.md) §14 另写一次性迁移（`admin_groups.data_scope`、`projects.owner_id` 回填并改非空、按负责人的唯一索引、`media_assets` 新索引），上线前由总后台核对各项目负责人。
 - Redis 没有迁移：所有键自带 TTL 或可重建。若发布涉及键格式变化，可在停止三个应用容器后执行 `FLUSHDB`，后果与恢复方式见下表。
 
 | 被清空的键 | 后果 | 自动恢复 |

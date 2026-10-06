@@ -20,7 +20,7 @@
 
 ### 2.1 三级产物链都归属项目
 
-关键词、标题、内容三类对象都带 `project_id`，彼此以 `keywords.id → titles.keyword_id → contents.title_id` 串联；内容另冗余 `keyword_id` 作为主关键词。项目提供语言、风格、格式、品牌信息、默认模板与默认模型（见 §4），生成表单据此预填，不需要重复填写。项目归档（`projects.status=archived`）后所有生成接口返回 409。
+关键词、标题、内容三类对象都带 `project_id`，彼此以 `keywords.id → titles.keyword_id → contents.title_id` 串联；内容另冗余 `keyword_id` 作为主关键词。项目提供语言、风格、格式、品牌信息、默认模板与默认模型（见 §4），生成表单据此预填，不需要重复填写。项目归档（`projects.status=archived`）后所有生成接口返回 409。项目负责人 `projects.owner_id` 决定这条产物链归谁：普通用户（数据范围 `own`）只能在自己负责的项目下生成、查看与编辑，生成接口的 `project_id`、`keyword_ids`、`title_ids`、`template_id` 指向不可见对象时与不存在相同（404 / 400），审核人员与总后台（`all`）可看到全部用户的产物（[13-user-data-scope](./13-user-data-scope.md)）。
 
 ### 2.2 API 只建任务，worker 执行
 
@@ -151,7 +151,7 @@ sequenceDiagram
 
 ### 4.3 项目页面职责
 
-`apps/admin/src/views/projects/Index.vue` 负责项目列表与新建/编辑弹窗（名称、slug、行业、受众、品牌名、品牌信息、说明、语言、默认风格、默认格式、负责人、常用平台）；`projects/Detail.vue` 分三个 Tab：概览（`GET /admin/projects/{id}/overview`，KPI 来自 [12-dashboard-reports](./12-dashboard-reports.md)）、默认模板（每个 `prompt_kind` 一个下拉，只列该 kind 的 `published` 模板，保存走 `PUT /admin/projects/{id}`）、默认模型（`keyword`/`title`/`content`/`rewrite` 四个文本能力各一行 `ModelSelect`（`modality=text`）+ 备选链，保存走 `PUT /admin/projects/{id}/routes`；`image`/`video`/`geo_check`/`seo_check` 行同页展示，含义见 08/10/11）。
+`apps/admin/src/views/projects/Index.vue` 负责项目列表与新建/编辑弹窗（名称、slug、行业、受众、品牌名、品牌信息、说明、语言、默认风格、默认格式、负责人、常用平台）；「负责人」下拉取自 `GET /admin/projects/owner-options`，只对总后台显示（新建缺省为当前用户或顶栏所选用户，编辑时修改即转移负责人并二次确认），普通用户隐藏该字段、负责人恒为本人；名称与 slug 在同一负责人下唯一（[13-user-data-scope](./13-user-data-scope.md) §7.2）；`projects/Detail.vue` 分三个 Tab：概览（`GET /admin/projects/{id}/overview`，KPI 来自 [12-dashboard-reports](./12-dashboard-reports.md)）、默认模板（每个 `prompt_kind` 一个下拉，只列该 kind 的 `published` 模板，保存走 `PUT /admin/projects/{id}`）、默认模型（`keyword`/`title`/`content`/`rewrite` 四个文本能力各一行 `ModelSelect`（`modality=text`）+ 备选链，保存走 `PUT /admin/projects/{id}/routes`；`image`/`video`/`geo_check`/`seo_check` 行同页展示，含义见 08/10/11）。
 
 ### 4.4 全局生成配置 `generation_config`
 
@@ -314,6 +314,7 @@ stateDiagram-v2
 - `POST /{id}/duplicate` 复制为新 code 的 `draft`（`{code,name}`），用于从系统模板派生项目模板（设置 `project_id`）。
 - 列表默认只返回每个 code 的最新版本，`?all_versions=1` 返回全部；`GET /{id}/versions` 返回同 code 全部版本，供编辑器版本面板对比。
 - 发布/归档权限 `content.prompt_templates.publish` 默认仅 `super_admin` 拥有（`OPERATOR_EXCLUDED` 排除 `operator`；`reviewer`/`read_only` 只有 `content.prompt_templates.view`，见 [07-admin-rbac](./07-admin-rbac.md)），运营人员只能起草与预览。
+- 可见性（[13-user-data-scope](./13-user-data-scope.md) §7.3）：项目模板随项目负责人可见；全局模板（`project_id=0`）的 `published`/`archived` 版本对所有用户只读可见，`draft` 只对创建人与总后台可见——普通用户起草的全局模板（含对已发布全局模板 `PUT` 复制出的新 `draft`）只有本人与总后台能看到，由总后台审阅后发布；`code` 全局唯一，被不可见模板占用时 409 `reason=owned_by_other`。
 - 已发布模板被业务对象引用（`generation_batches.template_id` 等）后仍可归档，历史记录保留模板 ID 与版本，不受影响。
 
 ### 5.7 系统模板 code 清单与内置默认模板

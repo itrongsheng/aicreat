@@ -672,6 +672,28 @@ POST /admin/ai/usage/reconcile
 
 Mock 下 `mock_token_logs()` 返回 `mock:usage_logs` 中的伪日志（每次文本/图片/视频调用各 `LPUSH` 一条 `type=2`，探测调用同样计入），按 `request_id` 匹配尝试行并回填 `quota_actual` / `reconciled_at` / `cost_cny`。核对规则是 `pulled >= 31` 且 `unmatched = 0`：比第 13 步 `ai_calls=30` 多出的部分全部是 `trigger_type=health_probe` 的探测尝试行——第 2 步一键测试 1 行，加上 worker 每 `health.probe_interval_seconds=600` 秒自动探测时每个 `(capability, model)` 组合各 1 行（Mock 下为 `keyword` / `title` / `content` / `rewrite` / `geo_check` / `seo_check` × `mock-text` 共 6 行；`image` / `video` 路由默认 `probe_media=false`，只核对目录、不发请求、不产生伪日志）。探测行参与对账但不计入 `ai_calls`；示例中的 31 对应「一键测试 1 次、自动探测尚未执行」的情形，流程耗时超过 10 分钟时 `pulled` 会随自动探测轮次增加。worker 每 `usage.reconcile_interval_seconds=300` 秒自动执行同样的对账，手动按钮只是提前触发（两者互斥于 `lock:worker:reconcile`）：若周期对账已先执行，本次返回的 `new` / `matched` 为 0（条目按 `entry_hash` 幂等、不重复入库），属正常。最终以 `GET /admin/ai/usage/summary?group_by=model` 的 `reconciled_rate=1.0` 为准（分子分母同样排除 `health_probe`）。「AI 任务」页切换 `row_kind=attempt` 可逐条查看 `request_id`、协议、tokens、额度、成本与错误分类；「操作日志」页记录了以上全部写操作（`admin_operation_logs`）。
 
+**第 15 步：数据隔离验证（用户系统）**
+
+验证「普通用户只能看到自己的数据、总后台看全部」（规则见 [13-user-data-scope](./13-user-data-scope.md)）。用 `admin` 在「系统 → 用户管理」新建两个 `operator` 组用户（数据范围默认「仅本人」）：
+
+```http
+POST /admin/admins
+```
+
+```json
+{ "username": "user_a", "display_name": "用户A", "password": "UserA2026x", "group_id": 2, "is_active": true }
+```
+
+同样创建 `user_b`（`group_id` 取 `GET /admin/admin-groups` 中 `code=operator` 的组 ID）。然后：
+
+1. 分别以 `user_a`、`user_b` 登录：`GET /admin/auth/me` 返回 `"data_scope": "own"`；顶栏没有用户视角切换器、显示「我的数据」；「项目」列表为空——前面步骤的示例项目负责人是 `admin`，对二人不可见。
+2. `user_a` 创建项目「A 的项目」并生成一批关键词（同第 3 步）；`user_b` 创建同名项目「A 的项目」也能成功（项目名按负责人唯一）。
+3. `user_b` 访问 `user_a` 的项目与关键词：`GET /admin/projects/{A 的项目 ID}`、`GET /admin/keywords/{A 的关键词 ID}` 均返回 `{ "code": 404, "message": "对象不存在", "data": null }`；`GET /admin/keywords?project_id={A 的项目 ID}` 返回空列表。
+4. `user_b` 回填第 10 步已回填过的 URL（需先有自己的 `approved` 内容）：返回 `{ "code": 409, "message": "该链接已由其他用户回填", "data": { "existing_id": null, "reason": "owned_by_other" } }`。
+5. 两人的「控制台」只统计各自项目：`GET /admin/stats/overview?range=7d` 的 `meta.scope="owner"`，`user_a` 的 `kpis.keywords_created` 等于其生成的数量，不含示例项目的数据。
+6. 用 `admin` 登录（`data_scope=all`）：顶栏出现用户视角切换器（`GET /admin/projects/owner-options` 列出 `admin` / `user_a` / `user_b`）；选「用户A」后所有列表与控制台只显示 `user_a` 的数据（请求自动附加 `owner_id`），与 `user_a` 本人所见一致；报表「分解」Tab 选维度「用户」（`GET /admin/stats/breakdown?dimension=owner&metric=keywords_created&start=…&end=…`）按用户列出关键词数。
+7. `admin` 把「A 的项目」的负责人改为 `user_b`（`PUT /admin/projects/{id}` `{"owner_id": <user_b 的 ID>}`）：因 `user_b` 已有同名项目返回 409；先把 `user_b` 的同名项目改名再转移即成功，之后 `user_a` 访问该项目返回 404，`user_b` 可见，项目下的关键词与统计随之转移。
+
 ### 预期耗时（Mock）
 
 | 步骤 | 典型耗时 | 决定因素 |
@@ -886,7 +908,7 @@ PowerShell 下 `curl` 是 `Invoke-WebRequest` 的别名，用 `Invoke-RestMethod
 | `admin` | `admin123` | `super_admin`（全部 90 个权限码） | `seeds/seed.py` 按 `SEED_ADMIN_USERNAME` / `SEED_ADMIN_PASSWORD` 创建；启动日志会提示修改密码 |
 
 - 首次登录后在顶栏「修改密码」（`POST /admin/auth/change-password`，≥ 8 位且含字母与数字）；成功后 `token_version += 1`，旧令牌失效需重新登录。改密后 `SEED_ADMIN_PASSWORD` 不再能登录（重放 `seeds/seed.py` 不会覆盖已存在账号的密码），运行冒烟脚本须用 `--password` 传入新密码（见「自动冒烟脚本」）。
-- 其余三个系统用户组 `operator`（运营）、`reviewer`（审核）、`read_only`（只读）只有组和默认权限，没有预置账号；在「系统 → 管理员」新建（`POST /admin/admins`）并选择用户组即可验证菜单过滤与 403。`operator` 没有 `content.contents.review`，`read_only` 只有各 `*.view`（不含 `system.settings.view` 与 `security.*`）加 `stats.reports.export`。
+- 其余三个系统用户组 `operator`（运营，数据范围「仅本人」）、`reviewer`（审核，「全部数据」）、`read_only`（只读，「全部数据」）只有组和默认权限，没有预置账号；在「系统 → 用户管理」新建（`POST /admin/admins`）并选择用户组即可验证菜单过滤、403 与数据隔离（第五节第 15 步）。`admin` 的数据范围固定为「全部数据」（总后台）。`operator` 没有 `content.contents.review`，`read_only` 只有各 `*.view`（不含 `system.settings.view` 与 `security.*`）加 `stats.reports.export`。
 - 安全规则：不能禁用自己或最后一个有效超管；系统组不可删除、停用或清空权限；管理员不物理删除。
 
 ## 九、排错

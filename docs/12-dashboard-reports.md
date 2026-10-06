@@ -13,8 +13,9 @@
 - 可复现：快照类指标从检测历史派生，任何一天的重算结果与当日计算一致；成本只对 `ai_tasks.cost_cny` 求和，不按当前汇率折算。
 - 导出：趋势 / 分解 / 榜单可导出 UTF-8 BOM CSV；链接、AI 任务、关键词等明细导出留在各自资源路由。
 - 权限：总览只需 `dashboard.view`；报表受 `stats.reports.view` / `stats.reports.export` / `stats.reports.recompute` 控制。
+- 数据范围（用户系统，[13-user-data-scope](./13-user-data-scope.md)）：普通用户（`data_scope=own`）的控制台与报表只统计本人负责的项目；总后台（`all`）看全部，可用 `owner_id` 切换到任一用户的视角，并可按用户分解（`dimension=owner`）。按用户统计不新增预聚合维度，而是在查询时对该用户的项目行求和（§3.1、§9）。
 
-非目标（首版不做）：自定义指标与自定义看板、小时级粒度、外部 OLAP 依赖（ClickHouse / Elasticsearch）、实时流式大屏、按项目的行级数据权限（项目筛选只是视图筛选）。
+非目标（首版不做）：自定义指标与自定义看板、小时级粒度、外部 OLAP 依赖（ClickHouse / Elasticsearch）、实时流式大屏、按「用户 × 平台 / 模型」等交叉维度的预聚合（按用户只能与单一维度组合，靠查询时对项目行求和实现）。
 
 范围划分：本文是指标公式、`daily_stats` 计算方式、报表接口语义、页面布局、导出、性能与缓存、`stats_config` 结构的权威。表结构与索引见 [03-data-model](./03-data-model.md)，接口总表与响应约定见 [04-api-spec](./04-api-spec.md)，worker 进程、Redis 键与队列总表见 [01-architecture](./01-architecture.md)，权限实现见 [07-admin-rbac](./07-admin-rbac.md)，AI 任务记录、额度估算与对账见 [08-zhiqiapi-integration](./08-zhiqiapi-integration.md)，内容状态机见 [09-generation-pipeline](./09-generation-pipeline.md)，媒体任务见 [10-media-generation](./10-media-generation.md)，链接检测、收录检测与告警见 [11-link-backfill-and-monitoring](./11-link-backfill-and-monitoring.md)。
 
@@ -83,6 +84,8 @@ flowchart LR
 | 比率 | 以 0~1 小数返回（保留 4 位），分母为 0 返回 `null`；前端显示 `--`，CSV 留空；比率在周 / 月粒度与分解中一律由**分子分母先求和再相除**得到，不对日比率取平均 |
 | 额度与金额 | `quota_*` 为 zhiqiapi 原始整数额度（`BIGINT`）；`cost_cny` 为人民币元（6 位小数），只对 `ai_tasks.cost_cny` 求和，不按当前 `ai_routing_config.pricing` 重新折算，历史金额可复现 |
 | 项目 | `project_id=0` 为全部项目汇总行；已物理删除的项目其 `daily_stats` 行保留（重算不删除，§4.1 规则 3），分解 / 榜单中按 `#<project_id>` 显示 |
+| 数据范围 | 每个查询先确定范围键（[13-user-data-scope](./13-user-data-scope.md) §10.1）：总后台且未带 `owner_id` 为 `all`，按本表其余口径取数；普通用户本人或总后台带 `owner_id` 为 `owner:{id}`，此时 `project_id=0` 表示「该用户负责的全部项目」——取这些项目的行按相同 `dimension` / `dimension_key` 求和（流量列与快照列都可加和，快照按链接计数、各项目链接集合不相交），当前值指标附加 `project_id IN (该用户的项目)`，今日兜底对各项目的 `stats:rt:{date}:{project_id}` 求和，告警只计这些项目的告警；`project_id` 不属于该用户返回 404。不归属任何项目的数据（系统告警等）只出现在 `all` 范围 |
+| 用户（负责人） | 仅分解接口的 `dimension=owner`：取各项目 `total` 行按 `projects.owner_id` 当前值分组，`key` 为用户 ID 字符串，标签同「人员」；已删除项目归入键 `0`（「已删除项目」）。与 `admin` 维度不同：`admin` 是操作人（`created_by` 等），`owner` 是数据归属人 |
 | 人员 | `dimension=admin`，`dimension_key` 为管理员 ID 字符串；标签取 `admins.display_name`，为空取 `admins.username` |
 | 平台 / 模型 / 能力 / 引擎 | `dimension_key` 分别为 `publish_platforms.code`、`ai_models.model_id`（或尝试行实际 `ai_tasks.model`）、能力枚举 `app.core.zhiqi.types.Capability`（`keyword` / `title` / `content` / `rewrite` / `image` / `video` / `geo_check` / `seo_check`，定义见 [08-zhiqiapi-integration](./08-zhiqiapi-integration.md)）、`seo_engine`（`baidu` / `bing` / `google`）与 `geo_engine`（`baidu_ai` / `doubao` / `kimi` / `deepseek` / `perplexity` / `chatgpt`，可在 `geo_engines` 扩展） |
 | 同名列的两种含义 | `links_deleted` / `links_changed` / `links_restored` 在总览 KPI 中是**当前值**（`publish_links` 按 `alive_status` 计数，仅 `links_deleted`）；在趋势 / 分解 / 榜单中是 `daily_stats` 的**事件计数**（当日进入该状态的次数）。页面文案必须区分「当前已删除链接数」与「当日新增删除」 |
@@ -451,7 +454,7 @@ sequenceDiagram
 | `intraday_refresh_seconds` | `0` 或 `60~86400` | `aggregate_today` 间隔；`0` 关闭，今日完全依赖 Redis 兜底 |
 | `retention_days` | `30~3650` | `daily_stats` 保留天数，超期行在每日聚合后分批删除 |
 | `rankings_limit` | `1~100` | `GET /admin/stats/rankings` 的 `limit` 默认值与前端下拉默认项 |
-| `overview_cache_seconds` | `0~3600` | `cache:stats:overview:{project_id}:{range}` 的 TTL；`0` 关闭总览缓存 |
+| `overview_cache_seconds` | `0~3600` | `cache:stats:overview:{scope_key}:{project_id}:{range}` 的 TTL；`0` 关闭总览缓存 |
 
 ## 5. 总览页（`views/Dashboard.vue`）
 
@@ -477,7 +480,8 @@ sequenceDiagram
 
 | 控件 | 实现 | 行为 |
 | --- | --- | --- |
-| 项目选择器 | `components/ProjectSelect.vue`，绑定 `store/project.ts`（持久化） | 「全部项目」= `project_id=0`；切换后重新请求 |
+| 用户视角（仅总后台） | 顶栏 `components/OwnerSelect.vue`，绑定 `store/project.ts` 的 `ownerId`（[13-user-data-scope](./13-user-data-scope.md) §12.2） | 「全部用户」= 不带 `owner_id`；选中用户后请求自动附加 `owner_id`，页面标题旁显示「正在查看 {用户}」；普通用户不显示，标题为「我的数据」 |
+| 项目选择器 | `components/ProjectSelect.vue`，绑定 `store/project.ts`（持久化） | 「全部项目」= `project_id=0`（普通用户为本人全部项目）；只列可见项目；切换后重新请求 |
 | 时间范围 | `el-radio-group`：`today` / `7d` / `30d`，默认 `7d`，记忆在 `localStorage` 键 `aicreat.dashboard.range` | 切换后重新请求 |
 | 刷新 | `el-button` | 立即重新请求（服务端缓存 ≤ 60s，响应 `meta.cached=true` 时按钮旁提示「缓存数据」） |
 | 数据时间 | `el-tag` | 显示 `meta.computed_at`（转本地时间）；`today_source` 徽标：`daily_stats` →「已聚合」、`realtime` →「实时计数」、`none` →「无今日数据」（warning 色） |
@@ -545,7 +549,7 @@ interface TrendChartProps { dates: string[]; series: TrendSeries[]; height?: num
 ### 5.6 告警摘要
 
 - 仅当 `usePermission().has('monitoring.alerts.view')` 时渲染，与顶栏 `AlertBadge.vue` 条件一致，避免无权限用户组触发 403。
-- 内容：按严重度的未处理数（`breakdowns.alerts_open` 的 `critical` / `warning` / `info`，按当前项目筛选）、今日新增与今日解决（来自 `store/alerts.ts` 的 `today_opened` / `today_resolved`，全局口径）、「前往告警中心」按钮（`alerts/Index.vue?status=open`）。
+- 内容：按严重度的未处理数（`breakdowns.alerts_open` 的 `critical` / `warning` / `info`，按当前项目筛选）、今日新增与今日解决（来自 `store/alerts.ts` 的 `today_opened` / `today_resolved`，不分项目、按数据范围：普通用户只计本人项目的告警）、「前往告警中心」按钮（`alerts/Index.vue?status=open`）。
 - `critical > 0` 时卡片边框使用 danger 色。
 
 ### 5.7 交互与状态
@@ -567,8 +571,9 @@ interface TrendChartProps { dates: string[]; series: TrendSeries[]; height?: num
 | --- | --- | --- | --- |
 | 时间范围 | `start` / `end` | `el-date-picker type="daterange"`，快捷项「最近 7 天 / 30 天 / 90 天 / 本月 / 上月」，默认最近 30 天；跨度上限 731 天（`retention_days` 之内） | 全部 |
 | 粒度 | `granularity` | `day` / `week` / `month`（`stats_granularity`），默认 `day`；跨度 > 92 天时默认切到 `week` | 趋势、AI 消耗 |
-| 项目 | `project_id` | `ProjectSelect.vue`（含「全部项目」= 0），默认跟随全局 `store/project.ts` | 全部 |
-| 维度 | `dimension` | `el-select`。趋势 Tab 取 `stats_dimension`：`total`（不分维度）/ `platform` / `capability` / `model` / `admin` / `seo_engine` / `geo_engine`；分解 Tab 取 `project` / `platform` / `capability` / `model` / `admin` / `seo_engine` / `geo_engine`（无 `total`；`project` 取各项目 `total` 行分组，不需要维度键，§9.3） | 趋势（选一个维度键看趋势）、分解（按维度分解） |
+| 用户 | `owner_id` | 顶栏用户视角切换器（仅总后台，§5.2），请求自动附加；普通用户恒为本人 | 全部 |
+| 项目 | `project_id` | `ProjectSelect.vue`（含「全部项目」= 0），默认跟随全局 `store/project.ts`；只列可见项目 | 全部 |
+| 维度 | `dimension` | `el-select`。趋势 Tab 取 `stats_dimension`：`total`（不分维度）/ `platform` / `capability` / `model` / `admin` / `seo_engine` / `geo_engine`；分解 Tab 取 `project` / `owner`（仅总后台显示）/ `platform` / `capability` / `model` / `admin` / `seo_engine` / `geo_engine`（无 `total`；`project` / `owner` 取各项目 `total` 行分组，不需要维度键，§9.3） | 趋势（选一个维度键看趋势）、分解（按维度分解） |
 | 维度键 | `dimension_key` | 依赖维度动态加载（§6.2） | 趋势 |
 | 指标 | `metrics` / `metric` | `el-select multiple`（趋势最多 8 个；分解最多 8 个，第一个为主指标，§6.4）；候选按 §3.2 分组，并按 §4.2 矩阵过滤掉当前维度不支持的指标 | 趋势、分解 |
 | 榜单类型 | `type` | `fastest_indexed` / `most_deleted_platforms` / `top_cost_models` / `top_cost_projects` / `top_failed_models` | 明细榜 |
@@ -586,6 +591,7 @@ interface TrendChartProps { dates: string[]; series: TrendSeries[]; height?: num
 | `capability` | `ai_calls`（也可直接用 `@aicreat/shared` 的 `CAPABILITIES` 常量） | i18n `stats.capability.<code>` |
 | `model` | `ai_calls` | `model_id`，后缀 `ai_models.vendor_name`（有则显示） |
 | `admin` | `ai_calls` | `admins.display_name` 或 `username` |
+| `owner`（仅分解，不作趋势维度；按用户看趋势用 `owner_id`） | `contents_created` | `admins.display_name` 或 `username`，已禁用用户加「（已禁用）」，键 `0` 为「已删除项目」 |
 | `seo_engine` | `seo_checks` | 引擎 code 大写（`BAIDU` / `BING` / `GOOGLE`） |
 | `geo_engine` | `geo_checks` | `geo_engines.engines[].name` |
 
@@ -601,7 +607,7 @@ interface TrendChartProps { dates: string[]; series: TrendSeries[]; height?: num
 ### 6.4 分解 Tab
 
 - 请求 `GET /admin/stats/breakdown`；左侧柱状图（前 10 项，其余合并为「其它」），右侧 `el-table`：键、标签、数值、占比 `share`（比率类指标占比显示 `--`）、操作（查看趋势）。
-- `dimension=project` 时排除 `project_id=0` 汇总行，已删除项目显示 `#<id>`。
+- `dimension=project` 时排除 `project_id=0` 汇总行，已删除项目显示 `#<id>`；`dimension=owner`（仅总后台显示）按项目负责人汇总，点击行可切换到该用户视角（设置顶栏 `ownerId`）。
 - 支持同时选择多个指标（`metric=a,b,c`，最多 8 个），表格增加对应列，排序与占比以第一个指标为准。
 
 ### 6.5 明细榜 Tab
@@ -626,7 +632,7 @@ interface TrendChartProps { dates: string[]; series: TrendSeries[]; height?: num
 ┌ 筛选：时间范围 │ 粒度 │ 项目 ┐
 ├ 汇总卡片：AI 调用 · 成功率 · tokens · 估算额度 · 实扣额度 · 对账率 · 费用（元）· 单篇内容成本   ┐
 ├ 趋势图：cost_cny（右轴）+ quota_estimated / quota_actual（左轴）按粒度                      │
-├ 按能力分解表 │ 按模型分解表 │ 按项目分解表（project_id=0 时显示）│ 按人员分解表            │
+├ 按能力分解表 │ 按模型分解表 │ 按项目分解表（project_id=0 时显示）│ 按人员分解表 │ 按用户分解表（仅总后台）│
 └────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -634,7 +640,7 @@ interface TrendChartProps { dates: string[]; series: TrendSeries[]; height?: num
 | --- | --- | --- |
 | 汇总卡片 | `GET /admin/stats/trends?metrics=ai_calls,ai_success_rate,tokens_total,quota_estimated,quota_actual,quota_reconciled_rate,cost_cny,cost_cny_per_content&granularity=day&…` | 前端对流量列求和、对比率按分子分母重算；比率指标的分子分母列（`ai_succeeded`、`quota_reconciled_calls`、`contents_created`）由后端自动附带在响应中（§9.2），前端无需额外请求 |
 | 趋势图 | 同上响应 | `cost_cny` 右轴，`quota_estimated` / `quota_actual` 左轴 |
-| 分解表 | 每张表两次请求，`metric` 均不超过 8 个（§9.3）：① `GET /admin/stats/breakdown?dimension=capability\|model\|project\|admin&metric=ai_calls,ai_success_rate,tokens_total,quota_estimated,quota_estimated_reconciled,quota_actual,quota_reconciled_rate,cost_cny&…`（8 个）；② 同维度、同范围 `metric=task_success_rate,task_avg_duration_ms` | ① 决定行集合、排序与占比（以 `ai_calls` 为准），② 的 `values` 按 `key` 并入同一行（两次请求都返回范围内存在聚合行的全部键，键集合相同，§6.2）；「对账差异」`quota_diff` 与差异率 `quota_diff_rate` 不再请求，由前端按 §7.3 公式用同一行的 `quota_actual` 与 `quota_estimated_reconciled` 计算；表尾合计行；`dimension=admin` 时 ① 去掉 `quota_reconciled_rate`（`admin` 行不填 `quota_reconciled_calls`，§4.2，请求会被 400 拒绝），该列显示 `--` |
+| 分解表 | 每张表两次请求，`metric` 均不超过 8 个（§9.3）：① `GET /admin/stats/breakdown?dimension=capability\|model\|project\|admin\|owner&metric=ai_calls,ai_success_rate,tokens_total,quota_estimated,quota_estimated_reconciled,quota_actual,quota_reconciled_rate,cost_cny&…`（8 个）；② 同维度、同范围 `metric=task_success_rate,task_avg_duration_ms` | ① 决定行集合、排序与占比（以 `ai_calls` 为准），② 的 `values` 按 `key` 并入同一行（两次请求都返回范围内存在聚合行的全部键，键集合相同，§6.2）；「对账差异」`quota_diff` 与差异率 `quota_diff_rate` 不再请求，由前端按 §7.3 公式用同一行的 `quota_actual` 与 `quota_estimated_reconciled` 计算；表尾合计行；`dimension=admin` 时 ① 去掉 `quota_reconciled_rate`（`admin` 行不填 `quota_reconciled_calls`，§4.2，请求会被 400 拒绝），该列显示 `--` |
 
 ### 7.2 额度与费用换算
 
@@ -711,8 +717,9 @@ Authorization: Bearer <admin-token>
 
 | 参数 | 必填 | 说明 |
 | --- | --- | --- |
-| `project_id` | 否 | 默认 `0`（全部）；不校验项目是否存在（已删除项目仍可查其保留行） |
+| `project_id` | 否 | 默认 `0`（全部）；`all` 范围不校验项目是否存在（已删除项目仍可查其保留行）；按用户统计时（`own` 范围或带 `owner_id`）`0` 表示该用户的全部项目，非 0 时须属于该用户，否则 404 |
 | `range` | 否 | `today` / `7d` / `30d`，默认 `7d` |
+| `owner_id` | 否 | 仅总后台有效：只统计该用户负责的项目（§3.1「数据范围」）；`own` 范围忽略 |
 
 ```json
 {
@@ -721,7 +728,7 @@ Authorization: Bearer <admin-token>
   "data": {
     "meta": {
       "range": "7d", "start_date": "2026-09-30", "end_date": "2026-10-06", "timezone": "Asia/Shanghai",
-      "project_id": 0, "today_source": "daily_stats", "snapshot_date": "2026-10-06",
+      "project_id": 0, "scope": "all", "owner_id": null, "today_source": "daily_stats", "snapshot_date": "2026-10-06",
       "computed_at": "2026-10-06T02:30:12Z", "cached": false, "warnings": []
     },
     "kpis": {
@@ -778,8 +785,9 @@ Authorization: Bearer <admin-token>
 - `compare` 只含流量类与比率类指标；`previous` 为 0 时 `delta_rate=null`。
 - `breakdowns.cost_by_capability` / `breakdowns.cost_by_model` 分别来自 `daily_stats` 的 `capability` / `model` 行，range 内求和后按 `cost_cny` 降序各取最多 8 行；每行列为 `capability`（或 `model`）、`ai_calls`、`ai_success_rate`、`tokens_total`、`quota_estimated`、`quota_actual`、`cost_cny`、`share`（费用占比），`cost_by_capability` 另带任务级 `task_success_rate`、`task_avg_duration_ms`（`image` / `video` 行供「媒体成功率」卡片副值使用）；示例中 `cost_cny_per_content = 88.1 / 24`，只取 `content` / `rewrite` 行（示例期内无 `rewrite` 调用）。示例的 `cost_by_capability` 只列出部分能力行（`content` / `image` / `video`），实际返回当期有调用的全部能力（能力枚举共 8 个，最多 8 行），因此示例各行之和小于 `kpis` 合计（如 `ai_calls` 259 < 540，差额来自省略的 `keyword` / `title` 等行）；`cost_by_model` 示例三行即全部模型。`*_by_engine` 的 `total` 为同日 `total` 行的 `links_total_snapshot`；`snapshot_date` 当日不存在该引擎行（引擎未启用，或该项目无该引擎数据）时 `rate` 与 `hit` 均为 `null`。
 - `meta.computed_at` = range 内所取 `daily_stats` `total` 行 `computed_at` 的最大值（今日走 Redis 兜底时仍取已聚合行的最大值），range 内无任何行时为 `null`。
+- `meta.scope` = `all`（总后台未按用户筛选）或 `owner`（普通用户本人，或总后台带 `owner_id`），`meta.owner_id` 为后者的用户 ID；`owner` 范围下 `*_by_engine` 的引擎集合取同日 `project_id=0` 引擎行的键（启用引擎），`hit` 为该用户各项目引擎行之和（无行计 0），`total` 为其各项目 `links_total_snapshot` 之和（[13-user-data-scope](./13-user-data-scope.md) §10.2）。
 - `series` 的天数 = range 天数，但最少 7 天（`today` 时返回最近 7 天）；缺行的日期填 0。
-- 缓存键 `cache:stats:overview:{project_id}:{range}`，TTL `overview_cache_seconds`。
+- 缓存键 `cache:stats:overview:{scope_key}:{project_id}:{range}`（`scope_key` = `all` 或 `owner:{owner_id}`），TTL `overview_cache_seconds`。
 - `GET /api/v1/admin/projects/{id}/overview`（`content.projects.view`）直接返回 `stats_service.overview(project_id=id, range)` 的同一结构，供项目详情页复用。
 
 ### 9.2 趋势
@@ -794,7 +802,8 @@ Authorization: Bearer <admin-token>
 | `metrics` | 是 | 逗号分隔，1~8 个，取值为 §3.2 的 `daily_stats` 来源指标或列名；比率指标自动附带其分子分母列不计入上限 |
 | `granularity` | 否 | `day`（默认）/ `week` / `month` |
 | `start` / `end` | 是 | `YYYY-MM-DD`（统计时区），闭区间，`start <= end`，跨度 ≤ 731 天 |
-| `project_id` | 否 | 默认 `0` |
+| `project_id` | 否 | 默认 `0`；按用户统计时规则同总览 |
+| `owner_id` | 否 | 同总览 |
 | `dimension` / `dimension_key` | 否 | `dimension` ∈ `stats_dimension`（`total` / `platform` / `capability` / `model` / `admin` / `seo_engine` / `geo_engine`；无 `project`，按项目看趋势用 `project_id`），默认 `total` / `''`；`dimension != total` 时 `dimension_key` 必填，且 `metrics` 须全部属于该维度的矩阵列或由其派生（§4.2） |
 
 ```json
@@ -812,7 +821,7 @@ Authorization: Bearer <admin-token>
 }
 ```
 
-本例使用独立的示例数据，与 §9.1 总览示例不对应。比率指标的分子分母列（此处 `ai_success_rate` 的 `ai_succeeded` / `ai_calls`）由后端自动附带在每行中，不计入 `metrics` 的 8 个上限。无行的周期不省略，流量列填 0、比率填 `null`、快照列沿用上一周期的值并不额外标注（前端按 `null` / 0 显示）。缓存键 `cache:stats:trends:{sha1(query)}`（`query` 为规范化后的参数串），TTL 300s。
+本例使用独立的示例数据，与 §9.1 总览示例不对应。比率指标的分子分母列（此处 `ai_success_rate` 的 `ai_succeeded` / `ai_calls`）由后端自动附带在每行中，不计入 `metrics` 的 8 个上限。无行的周期不省略，流量列填 0、比率填 `null`、快照列沿用上一周期的值并不额外标注（前端按 `null` / 0 显示）。缓存键 `cache:stats:trends:{sha1(query)}`（`query` 为规范化后的参数串，含范围键 `scope_key`），TTL 300s；按用户统计时维度行为该用户各项目同维度行之和。
 
 ### 9.3 分解
 
@@ -823,10 +832,11 @@ Authorization: Bearer <admin-token>
 
 | 参数 | 必填 | 说明 |
 | --- | --- | --- |
-| `dimension` | 是 | `project` / `platform` / `admin` / `model` / `capability` / `seo_engine` / `geo_engine`（`project` 取各项目 `total` 行按 `project_id` 分组并排除 `project_id=0`；其它取同名维度行） |
+| `dimension` | 是 | `project` / `owner` / `platform` / `admin` / `model` / `capability` / `seo_engine` / `geo_engine`（`project` 取各项目 `total` 行按 `project_id` 分组并排除 `project_id=0`；`owner` 取各项目 `total` 行按 `projects.owner_id` 当前值分组，已删除项目归入键 `0`，`metric` 规则同 `project`；其它取同名维度行） |
 | `metric` | 是 | 逗号分隔，1~8 个；第一个为主指标（排序与 `share` 依据） |
 | `start` / `end` | 是 | 同趋势 |
-| `project_id` | 否 | 默认 `0`；`dimension=project` 时忽略 |
+| `project_id` | 否 | 默认 `0`；`dimension=project` / `owner` 时忽略 |
+| `owner_id` | 否 | 同总览；按用户统计时 `dimension=project` 只列该用户的项目、`dimension=owner` 只返回该用户一行 |
 
 ```json
 {
@@ -840,7 +850,7 @@ Authorization: Bearer <admin-token>
 }
 ```
 
-`value` / `share` 对应主指标，`values` 含全部请求指标；比率类主指标的 `share=null`；快照类指标取 `end` 的快照行；按 `value` 降序、`key` 升序稳定排序；标签解析 `stats_service.resolve_labels(dimension, keys, locale)` 按 §6.2。缓存键 `cache:stats:breakdown:{sha1}`，TTL 300s。
+`value` / `share` 对应主指标，`values` 含全部请求指标；比率类主指标的 `share=null`；快照类指标取 `end` 的快照行；按 `value` 降序、`key` 升序稳定排序；标签解析 `stats_service.resolve_labels(dimension, keys, locale)` 按 §6.2。缓存键 `cache:stats:breakdown:{sha1}`（规范化查询串含 `scope_key`），TTL 300s。`owner` 维度按**当前**负责人归属：项目转移后其历史统计随之归到新负责人，与可见性一致（[13-user-data-scope](./13-user-data-scope.md) §10.3）。
 
 ### 9.4 榜单
 
@@ -855,6 +865,7 @@ Authorization: Bearer <admin-token>
 | `limit` | 否 | 默认 `stats_config.rankings_limit`（10），最大 100 |
 | `start` / `end` | 是 | 同趋势；`fastest_indexed` 按 `first_indexed_at` 落在范围内过滤，且不含补录延迟超过 `MAX_BACKFILL_DELAY_HOURS`（72）小时的历史补录链接（§3.2） |
 | `project_id` | 否 | 默认 `0`；`top_cost_projects` 忽略 |
+| `owner_id` | 否 | 同总览；按用户统计时 `fastest_indexed` 只取该用户项目的链接，`top_cost_projects` 只列其项目，其余三类对其项目行求和 |
 
 ```json
 {
@@ -870,7 +881,7 @@ Authorization: Bearer <admin-token>
 }
 ```
 
-其它四类的行结构固定为 `{rank, key, label, value, extra}`：`most_deleted_platforms` 的 `extra={links_total}`；`top_cost_models` / `top_failed_models` 的 `extra={ai_calls, ai_success_rate}`；`top_cost_projects` 的 `extra={contents_created, cost_cny_per_content}`。缓存键 `cache:stats:rankings:{sha1}`，TTL 300s。
+其它四类的行结构固定为 `{rank, key, label, value, extra}`：`most_deleted_platforms` 的 `extra={links_total}`；`top_cost_models` / `top_failed_models` 的 `extra={ai_calls, ai_success_rate}`；`top_cost_projects` 的 `extra={contents_created, cost_cny_per_content}`。缓存键 `cache:stats:rankings:{sha1}`（含 `scope_key`），TTL 300s。
 
 ### 9.5 导出
 
@@ -971,10 +982,11 @@ Content-Type: application/json
 
 | 键 | 内容 | TTL | 失效 |
 | --- | --- | --- | --- |
-| `cache:stats:overview:{project_id}:{range}` | 总览完整响应（含 `meta.cached=false` 原值，命中时由接口改写为 `true`） | `stats_config.overview_cache_seconds`（60s；0 关闭） | 任何 `aggregate(stat_date)` 完成后 `cache_delete_prefix("cache:stats:")`；TTL 到期 |
+| `cache:stats:overview:{scope_key}:{project_id}:{range}` | 总览完整响应（含 `meta.cached=false` 原值，命中时由接口改写为 `true`） | `stats_config.overview_cache_seconds`（60s；0 关闭） | 任何 `aggregate(stat_date)` 完成后 `cache_delete_prefix("cache:stats:")`；项目创建、删除、转移负责人提交后同样 `cache_delete_prefix("cache:stats:")`（可见项目集变化）；TTL 到期 |
 | `cache:stats:trends:{sha1(query)}` / `cache:stats:breakdown:{sha1}` / `cache:stats:rankings:{sha1}` | 查询结果 JSON | 300s | 同上 |
 
-- `query` 的规范化：参数按键名排序、值去首尾空白、`metrics` 按原顺序拼接，`sha1` 取十六进制；`project_id` 与 `locale` 参与哈希（标签随语言不同）。
+- `scope_key` = `all`（总后台未带 `owner_id`）或 `owner:{owner_id}`（普通用户本人，或总后台带 `owner_id`），取自 `DataScope.cache_key`（[13-user-data-scope](./13-user-data-scope.md) §9.1）；普通用户本人与总后台切到该用户视角的结果相同，共用缓存。
+- `query` 的规范化：参数按键名排序、值去首尾空白、`metrics` 按原顺序拼接，`sha1` 取十六进制；`scope_key`、`project_id` 与 `locale` 参与哈希（标签随语言不同）。
 - 今日的 Redis 实时计数本身不缓存；总览缓存 60s 意味着「今日」最多再滞后 60s，可接受。
 - 缓存读写走 `app.core.redis` 的 `cache_get_json` / `cache_set_json`；Redis 不可用时直接查库并在 `meta.warnings[]` 追加 `cache_unavailable`，不影响功能。
 
@@ -1006,7 +1018,7 @@ Content-Type: application/json
 - 后端：每个接口以 `Depends(require_permission("<code>"))` 声明单一静态权限码，同时写入 `request.state.permission_code`。
 - 前端：`Layout.vue` 菜单按 `dashboard.view` / `stats.reports.view` 过滤；路由 `meta.permission`；导出按钮 `v-permission="'stats.reports.export'"`，重算按钮 `v-permission="'stats.reports.recompute'"` 并二次确认（显示日期跨度与同步 / 异步提示）。
 - 审计：`POST /admin/stats/recompute` 由审计中间件记录 `action='execute'`、`target_type='daily_stats'`、`target_id=NULL`、`summary` 含日期跨度；GET 类接口不写日志；`PUT /admin/settings/stats_config` 记 `update`、`target_type='setting'`、`target_id='stats_config'`。
-- 项目筛选不是数据权限：任何拥有 `dashboard.view` 的管理员可查看全部项目的汇总数据。
+- 数据范围：权限码只决定能否打开总览与报表，能统计哪些数据由所属用户组的 `data_scope` 决定——普通用户（`own`）只能看到本人负责项目的统计（`project_id=0` 即本人全部项目，指定他人项目返回 404），总后台（`all`）看全部并可用 `owner_id` 按用户查看、用 `dimension=owner` 按用户分解；`POST /admin/stats/recompute` 是全局动作，不受数据范围影响（[13-user-data-scope](./13-user-data-scope.md) §10）。
 
 ## 12. 异常与降级
 
@@ -1031,9 +1043,9 @@ Content-Type: application/json
 
 - `server/app/models.py`：`DailyStats` 模型（表定义见 [03-data-model](./03-data-model.md)），`extra_json` 由 service 编解码。
 - `server/app/schemas/stats.py`：查询参数、响应模型、`StatsExportParams` 与各 `report` 的 `EXPORT_COLUMNS`（中文列头与列顺序）；`server/app/schemas/settings.py`：`StatsConfig`。
-- `server/app/services/stats_service.py`：`METRIC_SPECS`、`overview` / `trends` / `breakdown` / `rankings` / `export_csv`、`aggregate_daily`、`increment_realtime` / `realtime_today`、`day_bounds` / `today_date`、`resolve_labels`、缓存读写。
+- `server/app/services/stats_service.py`：`METRIC_SPECS`、`overview` / `trends` / `breakdown` / `rankings` / `export_csv`（均以 `DataScope` 为必填参数：`owner` 范围对该用户项目行求和、`dimension=owner` 分组、缓存键含 `scope_key`）、`aggregate_daily`、`increment_realtime` / `realtime_today`（`owner` 范围对多个项目键求和）、`day_bounds` / `today_date`、`resolve_labels`、缓存读写；范围谓词复用 `services/data_scope_service.py`（[13-user-data-scope](./13-user-data-scope.md) §9）。
 - `server/app/tasks/aggregate_daily_stats.py`：`aggregate` / `aggregate_today` / `catch_up` / `drain_recompute`；`server/app/monitor_worker.py`：注册 `run_due("stats_today", …)`、`run_daily("daily_stats", …)`、启动 `catch_up(days=3)`、每轮在 `recompute` 任务不在飞时 `LPOP queue:stats_recompute` 一条并 `named_submit("recompute", …)`。
-- `server/app/api/admin/stats.py`：六个接口；`server/app/api/__init__.py` 以 `prefix="/stats"` 挂载。
+- `server/app/api/admin/stats.py`：六个接口，均声明 `get_data_scope`；`server/app/api/__init__.py` 以 `prefix="/stats"` 挂载。
 - 各事件 service（`keyword_service` / `title_service` / `content_service` / `link_service` / `link_check_service` / `index_check_service` / `ai_gateway_service` / `media_service` 与 `transfer_media` / `alert_service`）：调用 `stats_service.increment_realtime`。
 - `server/app/services/settings_service.py`：`DEFAULT_SETTINGS["stats_config"]`，`ENV_SEED_PATHS` 的 `APP_TIMEZONE → stats_config.timezone`。
 - `server/tests/test_stats.py`；`server/scripts/integration_smoke.py` 报表步骤。
@@ -1041,7 +1053,7 @@ Content-Type: application/json
 ### 管理端
 
 - `apps/admin/src/api/stats.ts`：`overview` / `trends` / `breakdown` / `rankings` / `exportReport` / `recompute`（300s 超时）与指标分组常量。
-- `apps/admin/src/views/Dashboard.vue`、`apps/admin/src/views/stats/Reports.vue`。
+- `apps/admin/src/views/Dashboard.vue`、`apps/admin/src/views/stats/Reports.vue`（标题按范围显示「总览」/「我的数据」，分解维度与 AI 消耗 Tab 的「按用户」仅总后台显示）；顶栏 `components/OwnerSelect.vue` 与 `store/project.ts` 的 `ownerId`（[13-user-data-scope](./13-user-data-scope.md) §12）。
 - `apps/admin/src/components/KpiCard.vue`、`apps/admin/src/components/TrendChart.vue`（新增）；复用 `ProjectSelect.vue`、`StatusTag.vue`。
 - `apps/admin/src/utils/format.ts`：`formatNumber` / `formatPercent` / `formatCny` / `formatDuration` / `formatQuota` / `formatTokens`；`apps/admin/src/utils/download.ts` 的 CSV 保存。
 - `apps/admin/src/views/settings/Index.vue`：「统计」Tab 编辑 `stats_config`。
@@ -1071,11 +1083,13 @@ Content-Type: application/json
 - 导出：BOM、`\r\n`、文件名 `stats-{report}-{YYYYMMDD}.csv`（导出当日）、中文列头与 `EXPORT_COLUMNS` 列顺序（如趋势首行 `日期,AI 调用,费用（元）`）、`null` 留空、`cost_cny` 六位小数；超过 50,000 行 → 400；无 `stats.reports.export` → 403。
 - 重算：≤ 7 天同步执行并返回 `rows_upserted` / `skipped[]`；锁被占用时日期进入 `skipped[]`；> 7 天入队 `queue:stats_recompute`（校验队列元素）并返回 202；> 31 天或 `end_date` 晚于今日 → 400；操作日志 `action=execute`、`target_type=daily_stats`；`recompute` 任务在飞时主循环不 `LPOP`，队列元素不丢失、下一轮被消费。
 - 权限：`dashboard.view` / `stats.reports.view` / `export` / `recompute` 缺失时各接口 403；`read_only` 可导出、不可重算。
+- 数据范围（完整用例见 [13-user-data-scope](./13-user-data-scope.md) §16）：普通用户的总览 / 趋势 / 分解 / 榜单 / 导出只含本人项目，`project_id=0` 等于其各项目行之和（含快照列与 `*_by_engine`），指定他人项目 → 404；总后台带 `owner_id` 与该用户本人结果一致且共用缓存键；`dimension=owner` 按当前负责人分组、已删除项目归入键 `0`、普通用户只得到本人一行；项目转移负责人后统计随之归属并清除 `cache:stats:*`；今日兜底对该用户各项目的 `stats:rt` 求和。
 - 实时计数：各事件 service 写入正确字段（含根任务终态写入的 `tasks_*` / `task_duration_ms_sum`；收录检测写回时 `index_hours_links` 与 `index_hours_sum` 同步累加，历史补录两列均不累加）与 `project_id=0` 汇总键；归属到非今日的事件不写；`EXPIRE` 为 259200。
 - 冒烟（`server/scripts/integration_smoke.py`，流程以 [06-getting-started](./06-getting-started.md)「自动冒烟脚本」与 [11-link-backfill-and-monitoring](./11-link-backfill-and-monitoring.md) §16.4 为准）：Mock 模式跑通 登录 → 关键词 → 标题 → 内容 → 图片 → 回填 → 检测（含删除检测 / 告警分支：另回填一条返回 404 的公网 URL，断言 `deleted` 与 `link_deleted` 告警；恢复分支 `link_restored` 由后端测试覆盖）→ 触发重算 → 总览，报表步骤断言 `seo_index_rate` / `geo_cite_rate` 非 `null` 且 > 0、`ai_calls > 0`、`cost_cny >= 0`。
 
 ### 管理端
 
+- 数据范围：普通用户标题为「我的数据」、无用户视角切换器、分解维度无「用户」；总后台切换用户后所有请求带 `owner_id` 并显示「正在查看」提示。
 - 总览：项目与范围切换触发请求并更新 URL 无关状态；`today_source` 徽标三态；KPI 环比箭头与反色规则；能力 / 模型消耗切换；无权限时卡片不可点击、告警摘要不渲染；骨架、错误重试、空数据引导；60s 自动刷新与隐藏暂停。
 - 报表：筛选同步到路由 query 并可刷新还原；维度切换后指标下拉按矩阵过滤、维度键候选按 §6.2 加载；周 / 月粒度的「不完整」角标；分解表「查看趋势」联动；榜单五种类型的列；AI 消耗 Tab 汇总卡片、分解表两次请求按 `key` 合并（`quota_diff` / `quota_diff_rate` 由前端计算，`metric` 每次不超过 8 个）与表尾合计行；导出按钮权限与文件下载；重算二次确认、`skipped[]` 提示、202 入队提示、300s 超时提示。
 - 主题与响应式：浅色 / 深色下图表重建、颜色正确；`< 768px` 布局；中英文文案完整无缺失 key。
@@ -1095,14 +1109,15 @@ Content-Type: application/json
 11. `stats_config` 可在系统配置页编辑并经校验，修改时区后前端提示重算。
 12. Mock 模式下 `integration_smoke.py` 报表步骤通过，`seo_index_rate` / `geo_cite_rate` 非 `null` 且 > 0。
 13. 浅色 / 深色主题、桌面与移动端布局正常，中英文文案完整。
+14. 普通用户的控制台与报表只统计本人负责的项目；总后台能按用户查看（与该用户本人所见一致）并按用户分解统计（[13-user-data-scope](./13-user-data-scope.md) §17）。
 
 ## 16. 实施顺序
 
 1. 后端基础：`DailyStats` 模型与 `StatsConfig` 校验、`DEFAULT_SETTINGS["stats_config"]`、`stats_service` 的时区工具与 `METRIC_SPECS`。
 2. 聚合：`stats_service.aggregate_daily` 各采集函数与快照派生 SQL，`tasks/aggregate_daily_stats.py` 四个函数与 monitor_worker 注册，`test_stats.py` 聚合与口径用例。
 3. 实时计数：`increment_realtime` / `realtime_today` 并接入各事件 service。
-4. 查询接口：`overview` → `trends` → `breakdown` → `rankings`，缓存与参数校验，`schemas/stats.py`。
+4. 查询接口：`overview` → `trends` → `breakdown` → `rankings`，缓存与参数校验，`schemas/stats.py`；数据范围（范围键、`owner` 范围的项目行求和、`dimension=owner`、缓存键含 `scope_key`，[13-user-data-scope](./13-user-data-scope.md) §10）。
 5. 导出与重算：`export_csv`、`POST /admin/stats/recompute`（同步 / 入队）、`drain_recompute`、审计验证。
-6. 前端总览：`KpiCard.vue`、`TrendChart.vue`、`Dashboard.vue`、`api/stats.ts`、i18n。
+6. 前端总览：`KpiCard.vue`、`TrendChart.vue`、`Dashboard.vue`、`api/stats.ts`、i18n；顶栏 `OwnerSelect.vue` 与按范围的标题。
 7. 前端报表：`stats/Reports.vue` 四个 Tab、筛选器与维度键加载、导出与重算交互、系统配置页「统计」Tab。
 8. 验收：`integration_smoke.py` 报表步骤、Mock 全流程冒烟、主题与响应式检查。

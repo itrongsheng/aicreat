@@ -6,11 +6,11 @@
 | --- | --- |
 | ORM 模型 | `server/app/models.py`（全部 24 张表；文件顶部以 `Literal` 常量声明各状态枚举集合，与 `packages/shared/src/enums.ts` 同名同值） |
 | 建表迁移 | `server/migrations/versions/0001_initial.py`（全部 24 张表、索引、真实外键） |
-| 权限 seed 迁移 | `server/migrations/versions/0002_seed_permissions.py`（只写 `admin_permissions` 与系统用户组；权限码表见 [07-admin-rbac](./07-admin-rbac.md)） |
+| 权限 seed 迁移 | `server/migrations/versions/0002_seed_permissions.py`（只写 `admin_permissions` 与系统用户组（含各组默认 `data_scope`）；权限码表见 [07-admin-rbac](./07-admin-rbac.md)） |
 | 启动时写入 | `admin_rbac_service.ensure_rbac_seed`、`settings_service.ensure_default_settings`（`settings` 键不存在则插入默认 JSON 深合并环境变量派生值）、`ai_gateway_service.ensure_default_routes`（8 条全局 `capability_routes`）；三者由 `main.py` 与两个 worker 在 `lock:bootstrap` 内执行，全部幂等 |
-| 数据 seed | `server/seeds/seed.py`：幂等 upsert 默认超级管理员 `admin/admin123`、示例项目、系统 Prompt 模板（`zh-CN`）、默认发布平台 |
+| 数据 seed | `server/seeds/seed.py`：幂等 upsert 默认超级管理员 `admin/admin123`、示例项目（`owner_id` = 默认超管）、系统 Prompt 模板（`zh-CN`）、默认发布平台 |
 
-状态枚举的取值集合汇总见 [00-overview](./00-overview.md)；各状态机的流转规则以功能文档为准：关键词/标题/内容/批次 → [09-generation-pipeline](./09-generation-pipeline.md)，AI 任务与错误分类 → [08-zhiqiapi-integration](./08-zhiqiapi-integration.md)，媒体 → [10-media-generation](./10-media-generation.md)，链接存活/收录/告警 → [11-link-backfill-and-monitoring](./11-link-backfill-and-monitoring.md)，报表指标 → [12-dashboard-reports](./12-dashboard-reports.md)。接口字段命名规则见 [04-api-spec](./04-api-spec.md)；Redis 键、队列与锁的完整清单见 [01-architecture](./01-architecture.md)。
+数据归属与可见性（`admin_groups.data_scope`、`projects.owner_id` 的隔离语义）见 [13-user-data-scope](./13-user-data-scope.md)；状态枚举的取值集合汇总见 [00-overview](./00-overview.md)；各状态机的流转规则以功能文档为准：关键词/标题/内容/批次 → [09-generation-pipeline](./09-generation-pipeline.md)，AI 任务与错误分类 → [08-zhiqiapi-integration](./08-zhiqiapi-integration.md)，媒体 → [10-media-generation](./10-media-generation.md)，链接存活/收录/告警 → [11-link-backfill-and-monitoring](./11-link-backfill-and-monitoring.md)，报表指标 → [12-dashboard-reports](./12-dashboard-reports.md)。接口字段命名规则见 [04-api-spec](./04-api-spec.md)；Redis 键、队列与锁的完整清单见 [01-architecture](./01-architecture.md)。
 
 ## 数据库约定
 
@@ -37,12 +37,12 @@
 | # | 表 | 域 | 用途 | 特性 | 语义/流转权威 |
 | --- | --- | --- | --- | --- | --- |
 | B.1 | `admins` | RBAC | 管理员账号 | | [07](./07-admin-rbac.md) |
-| B.2 | `admin_groups` | RBAC | 用户组（`super_admin`/`operator`/`reviewer`/`read_only`） | | 07 |
+| B.2 | `admin_groups` | RBAC | 用户组（`super_admin`/`operator`/`reviewer`/`read_only`），带数据范围 `data_scope` | | 07、[13](./13-user-data-scope.md) |
 | B.3 | `admin_permissions` | RBAC | 权限码定义（迁移 seed，后台不可新增） | | 07 |
 | B.4 | `admin_group_permissions` | RBAC | 用户组 × 权限 | 复合主键 | 07 |
 | B.5 | `admin_operation_logs` | RBAC | 操作审计 | 不可变 | 07 |
 | B.6 | `settings` | 配置 | 配置 JSON（`key` + `locale`） | 复合主键 | 各键权威见 B.6 清单 |
-| B.7 | `projects` | 生成 | 项目/专题 | | [09](./09-generation-pipeline.md) |
+| B.7 | `projects` | 生成 | 项目/专题；`owner_id` 为数据归属键 | | [09](./09-generation-pipeline.md)、[13](./13-user-data-scope.md) |
 | B.8 | `prompt_templates` | 生成 | Prompt 模板（`code` + `version`） | | 09 |
 | B.9 | `generation_batches` | 生成 | 关键词/标题/内容生成批次 | | 09 |
 | B.10 | `keywords` | 生成 | 关键词 | | 09 |
@@ -73,6 +73,7 @@ erDiagram
     admin_groups ||--o{ admin_group_permissions : "授权"
     admin_permissions ||--o{ admin_group_permissions : "被授权"
     admins ||--o{ admin_operation_logs : "操作"
+    admins ||--o{ projects : "owner_id 负责人"
     projects ||--o{ prompt_templates : "project_id>0"
     projects ||--o{ capability_routes : "project_id>0"
     projects ||--o{ generation_batches : "发起"
@@ -146,14 +147,14 @@ erDiagram
 
     projects {
         bigint id PK
-        varchar name UK
-        varchar slug UK
+        bigint owner_id FK
+        varchar name
+        varchar slug
         varchar language
         varchar default_style
         varchar default_format
         text default_templates_json
         varchar status
-        bigint owner_id
     }
     prompt_templates {
         bigint id PK
@@ -421,7 +422,7 @@ erDiagram
 
 ### B.1 admins
 
-**管理员账号**。登录、JWT 校验（claims `sub`/`aud="admin"`/`ver`）与权限判定流程见 [07-admin-rbac](./07-admin-rbac.md)。
+**管理员账号**（界面称「用户」）。登录、JWT 校验（claims `sub`/`aud="admin"`/`ver`）与权限判定流程见 [07-admin-rbac](./07-admin-rbac.md)；账号的数据范围取自所属用户组的 `data_scope`（B.2），作为 `projects.owner_id` 的项目负责人时拥有该项目下的全部数据（[13-user-data-scope](./13-user-data-scope.md)）。
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
@@ -453,9 +454,11 @@ erDiagram
 | description | VARCHAR(255) | 说明，可空 |
 | is_system | TINYINT 默认 0 | 系统内置组不可删除/停用 |
 | is_active | TINYINT 默认 1 | 是否可用 |
+| data_scope | VARCHAR(16) 默认 `own` | `data_scope`：`all`（全部数据，总后台）/ `own`（仅本人负责的项目及其下数据）；系统组默认 `super_admin`/`reviewer`/`read_only` 为 `all`、`operator` 为 `own`，`super_admin` 固定 `all` 不可修改；自定义组创建时缺省 `own`。语义与可见性规则见 [13-user-data-scope](./13-user-data-scope.md) |
 | created_by | BIGINT | 创建人，可空 |
 
 - 索引：`UNIQUE(code)`、`UNIQUE(name)`。
+- `data_scope` 每次请求实时读取，修改立即生效，不递增成员的 `token_version`；修改写审计（[13-user-data-scope](./13-user-data-scope.md) §3.3）。
 - 非系统组的 `code` 由服务端生成 `custom_{uuid4().hex[:12]}`，创建后不可修改；`name_en` 由 `name` 自动生成。
 - 系统组（`is_system=1`）不可删除、不可停用、不可清空权限；仍有启用中管理员（`admins.is_active=1`）的自定义组不可停用；有成员（含已禁用管理员）的组不可删除（以上均为安全规则，service 校验返回业务码 403 `CODE_FORBIDDEN`；删除另由真实外键 `admins.group_id` 的 `RESTRICT` 兜底）。删除非系统空组时同一事务先删除其 `admin_group_permissions` 行再删除组行（该表外键为 `RESTRICT`，不级联）。
 
@@ -547,13 +550,13 @@ ON DUPLICATE KEY UPDATE value = VALUES(value);
 
 ### B.7 projects
 
-**项目/专题**：内容生产的组织单位，所有关键词/标题/内容/素材/链接/批次/AI 任务归属项目。
+**项目/专题**：内容生产的组织单位，所有关键词/标题/内容/素材/链接/批次/AI 任务归属项目；项目负责人 `owner_id` 是这些数据的归属用户，也是数据隔离的唯一依据（[13-user-data-scope](./13-user-data-scope.md)）。
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | id | BIGINT PK AI | 主键 |
-| name | VARCHAR(100) | 项目名，唯一 |
-| slug | VARCHAR(80) | URL 友好标识，唯一 |
+| name | VARCHAR(100) | 项目名，同一负责人下唯一 |
+| slug | VARCHAR(80) | URL 友好标识，同一负责人下唯一 |
 | industry | VARCHAR(80) | 行业，可空 |
 | audience | VARCHAR(255) | 目标受众描述，可空 |
 | brand_name | VARCHAR(100) | 品牌名，可空 |
@@ -565,10 +568,11 @@ ON DUPLICATE KEY UPDATE value = VALUES(value);
 | default_templates_json | TEXT | 以 `prompt_kind` 为键的字典 `{"<kind>": template_id}`，可空；键 ∈ 14 种 `prompt_kind`，值须为该 kind 的 `published` 模板 ID（service 校验） |
 | default_platform_ids_json | TEXT | 常用发布平台 ID 数组，可空 |
 | status | VARCHAR(16) 默认 `active` | `project_status`：`active`/`archived` |
-| owner_id | BIGINT | 负责人管理员 ID，可空 |
+| owner_id | BIGINT FK→admins | 项目负责人（用户 ID，逻辑外键）：项目及其下全部数据归属此用户；创建时缺省为创建人，总后台（`data_scope=all`）可指定或转移，普通用户只能是本人（[13-user-data-scope](./13-user-data-scope.md) §7.2） |
 | created_by | BIGINT | 创建人 |
 
-- 索引：`UNIQUE(name)`、`UNIQUE(slug)`、`INDEX(status)`、`INDEX(owner_id)`。
+- 索引：`UNIQUE(owner_id, name)`、`UNIQUE(owner_id, slug)`、`INDEX(status)`（`owner_id` 的查询走 `uq_projects_owner_id_name` 的最左前缀，不再单建 `INDEX(owner_id)`）。名称与 slug 按负责人唯一，避免 409 冲突暴露其他用户的项目名。
+- 转移负责人只改本行 `owner_id`（子表经 `project_id` 归属，无需迁移），提交后清 `cache:stats:*`（见「一致性与事务规则 · 数据归属与负责人转移」）。
 - `default_templates_json` 示例：`{"keyword": 12, "title": 15, "content": 21, "image_prompt": 30}`。模板解析 `prompt_template_service.resolve_template(kind, project_id, language)` 固定三步：① 取 `projects.default_templates_json[kind]`——该 ID 对应版本仍为 `published` 则直接使用；若因同 `code` 发布了新版本而已变为 `archived`，改取该 `code` 当前的 `published` 版本；② 未配置、或该 `code` 已无 `published` 版本时，按 `kind` 取下表配置项给出的 code，再取该 code 的 `published` 版本；③ 两步均先匹配 `language`（= `projects.language`），找不到同语言的 `published` 模板时回退 `zh-CN`；仍找不到（系统模板缺失）则抛业务码 404 `CODE_NOT_FOUND`，`data={"kind":…}`。
 
 | kind | 缺省 code 来源 |
@@ -611,6 +615,7 @@ ON DUPLICATE KEY UPDATE value = VALUES(value);
 
 - 索引：`UNIQUE(code, version)`、`INDEX(kind, status, project_id)`、`INDEX(project_id)`。
 - 同一 `code` 同时只能有一个 `published` 版本（service 在发布事务内把旧 `published` 版本置 `archived`）。
+- 可见性（[13-user-data-scope](./13-user-data-scope.md) §4.2、§7.3）：项目模板随项目负责人可见；全局模板（`project_id=0`）的 `published`/`archived` 版本对所有用户只读可见，`draft` 版本只对创建人与总后台可见；`code` 全局唯一，新建时命中不可见模板返回 409 `data={"existing_id":null,"reason":"owned_by_other"}`。
 - `kind` → `capability` 推导（固定映射，用于路由解析与报表归类）：
 
 | kind | capability |
@@ -834,7 +839,8 @@ ON DUPLICATE KEY UPDATE value = VALUES(value);
 | sort | INT 默认 0 | 内容内排序 |
 | created_by | BIGINT | 创建人 |
 
-- 索引：`INDEX(project_id, kind, status, created_at)`、`INDEX(content_id, sort)`、`INDEX(ai_task_id)`、`INDEX(status, updated_at)`、`INDEX(status, next_transfer_at)`、`INDEX(upstream_task_id)`、`INDEX(kind, ready_at)`、`INDEX(kind, failed_at)`。
+- 索引：`INDEX(project_id, kind, status, created_at)`、`INDEX(content_id, sort)`、`INDEX(ai_task_id)`、`INDEX(status, updated_at)`、`INDEX(status, next_transfer_at)`、`INDEX(upstream_task_id)`、`INDEX(kind, ready_at)`、`INDEX(kind, failed_at)`、`INDEX(created_by, created_at)`。
+- 归属：有 `project_id` 的素材随项目负责人；`project_id` 为空的素材（上传的参考素材，绑定到内容前）按上传人 `created_by` 归属，只对上传人与总后台可见（`INDEX(created_by, created_at)` 供此过滤，[13-user-data-scope](./13-user-data-scope.md) §4.2、§7.4）。
 - `params_json` 示例（图片）：`{"resolution":"1080p","aspect_ratio":"16:9","reference_image_urls":[]}`；（视频）：`{"resolution":"720p","duration":5,"aspect_ratio":"16:9","generate_audio":false,"input_reference":"https://…"}`。字段取值集合：`image_resolution` `1080p`/`2k`/`4k`，`image_aspect_ratio` `1:1`/`4:3`/`3:4`/`16:9`/`9:16`，`video_resolution` `480p`/`720p`/`1080p`/`4k`；上游取值范围以 zhiqiapi 官方文档为准。
 - `deleted`（`DELETE /admin/media/assets/{id}`，删除存储文件）保留 `ready_at`/`failed_at`，报表按发生时刻统计、不看当前状态。
 - `uploaded` 素材创建即 `ready`（`ready_at` = 上传时刻），`ai_task_id` 为 NULL。
@@ -1165,7 +1171,7 @@ WHERE id = :task_id AND status = 'queued';   -- rowcount = 0 表示已被其它�
 | alert_type | VARCHAR(40) | `alert_type`：`link_deleted`/`link_restored`/`link_changed`/`index_overdue`/`ai_task_failures`/`ai_breaker_open`/`ai_quota_exceeded`/`ai_auth_failed`/`ai_upstream_unavailable`/`media_task_failed`/`worker_stale` |
 | severity | VARCHAR(10) | `alert_severity`：`info`/`warning`/`critical` |
 | status | VARCHAR(16) 默认 `open` | `alert_status`：`open`/`acknowledged`/`resolved`/`ignored` |
-| project_id | BIGINT | 项目，可空 |
+| project_id | BIGINT | 项目，可空：业务告警（`link_*`/`index_overdue` 取链接的 `project_id`，`media_task_failed` 取资产的 `project_id`）必须写入，决定告警对哪位用户可见；系统告警（`ai_*`/`worker_stale`）为 NULL，只对总后台可见（[13-user-data-scope](./13-user-data-scope.md) §11） |
 | target_type | VARCHAR(32) | `alert_target_type`：`publish_link`/`content`/`ai_task`/`ai_model`/`capability_route`/`media_asset`/`worker`/`system`，可空 |
 | target_id | BIGINT | 数值目标 ID（`ai_model`/`worker`/`system` 为 NULL），可空 |
 | target_key | VARCHAR(160) 默认 `''` | 去重用目标键：数值目标写 `str(target_id)`；`ai_model` 写 `{capability}:{model}`；`worker` 写进程级 `{name}`（`worker`/`monitor_worker`）或副本级 `{name}:{hostname}:{pid}`；`system` 写空串 |
@@ -1195,7 +1201,7 @@ WHERE id = :task_id AND status = 'queued';   -- rowcount = 0 表示已被其它�
 | --- | --- | --- |
 | id | BIGINT PK AI | 主键 |
 | stat_date | DATE | 统计日（`stats_config.timezone` 切日） |
-| project_id | BIGINT 默认 0 | 0 = 全部项目 |
+| project_id | BIGINT 默认 0 | 0 = 全部项目（总后台汇总行）；按用户统计时不读 0 行，而对该用户负责的项目行求和（[13-user-data-scope](./13-user-data-scope.md) §10） |
 | dimension | VARCHAR(16) | `stats_dimension`：`total`/`platform`/`capability`/`model`/`admin`/`seo_engine`/`geo_engine` |
 | dimension_key | VARCHAR(120) 默认 `''` | `total` → `''`；`platform` → 平台 `code`；`capability` → 能力；`model` → 模型 ID；`admin` → 管理员 ID 字符串；`seo_engine`/`geo_engine` → 引擎 code |
 | keywords_created | INT 默认 0 | 归属 `keywords.created_at`；当日新增关键词 |
@@ -1388,11 +1394,18 @@ ON DUPLICATE KEY UPDATE keywords_created = VALUES(keywords_created), …, comput
 4. 聚合完成后清 `cache:stats:*`；`stats:rt:{date}:{project_id}` 只用于「今日」未聚合时的兜底，口径相同，不参与重算。
 5. 已删除项目的行保留，报表按 `project_id` 显示；`retention_days`（730）之外的行由每日聚合任务自动分批删除：`monitor_worker` 每日聚合（昨天 + 前天）完成后删除 `stat_date < today − stats_config.retention_days` 的行，每批 1000 行（12 §4.4）。
 
+### 数据归属与负责人转移
+
+1. **归属唯一依据**：业务数据只经 `project_id` 归属到 `projects.owner_id`（`project_id` 为空的上传素材按 `media_assets.created_by`，`admin_operation_logs` 按 `admin_id`）；`created_by` 等操作人列不参与可见性判断。完整矩阵见 [13-user-data-scope](./13-user-data-scope.md) §4.2。
+2. **写全 `project_id`**：凡能确定项目的写入点都必须写 `project_id`——告警（B.23）、`ai_tasks` 根任务与尝试行（B.15）、收录检测根任务（`= publish_links.project_id`）、内嵌 `image_prompt` 根任务（= 宿主资产 `project_id`），否则数据会落入只有总后台可见的「无项目」部分。
+3. **转移负责人**（`PUT /admin/projects/{id}` 改 `owner_id`，仅总后台）：同一事务只更新 `projects.owner_id`（目标用户须 `is_active=1`，目标用户下 `name`/`slug` 冲突返回 409）；子表、`daily_stats` 项目行、告警都随 `project_id` 自动转移，无需改写；提交后 `cache_delete_prefix("cache:stats:")`。项目创建、删除同样在提交后清 `cache:stats:*`（可见项目集变化，统计缓存键含范围段，见 [12-dashboard-reports](./12-dashboard-reports.md) §10.3）。
+4. **全局唯一键**：`publish_links.url_hash`、`prompt_templates.code` 跨用户全局唯一；冲突对象对请求者不可见时 409 返回 `{"existing_id":null,"reason":"owned_by_other"}`，不暴露对象 ID（`projects` 已改为按负责人唯一，不会跨用户冲突）。
+
 ### 删除规则
 
 | 对象 | 允许条件 | 同事务动作 | 否则 |
 | --- | --- | --- | --- |
-| `projects` | `status='archived'` 且无任何 `keywords`/`titles`/`contents`/`publish_links`/`media_assets`/`generation_batches` | 删除该项目专属 `prompt_templates(project_id=id)` 与 `capability_routes(project_id=id)`；`ai_tasks.project_id`/`alerts.project_id` 置 NULL；`daily_stats` 项目行保留；清 `cache:routes:` | 409 |
+| `projects` | `status='archived'` 且无任何 `keywords`/`titles`/`contents`/`publish_links`/`media_assets`/`generation_batches` | 删除该项目专属 `prompt_templates(project_id=id)` 与 `capability_routes(project_id=id)`；`ai_tasks.project_id`/`alerts.project_id` 置 NULL；`daily_stats` 项目行保留；清 `cache:routes:`；提交后清 `cache:stats:*` | 409 |
 | `contents` | `status ∈ draft/archived` 且 `link_count=0` | 级联删除 `content_versions`（真实外键）；解绑素材（`media_assets.content_id=NULL`，`usage_type` 保留）；`keywords.content_count`/`titles.content_count` −1 | 409 |
 | `content_versions` | 非当前版本（`id != contents.current_version_id`） | 物理删除；`version_count` 不回退 | 409 |
 | `keywords` | 无标题/内容关联（`title_count=0 AND content_count=0`，不限状态） | 物理删除 | 409 |

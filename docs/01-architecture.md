@@ -321,7 +321,7 @@ flowchart LR
     Recompute["POST /admin/stats/recompute：跨度 ≤ 7 天在 API 内逐日同步（200），8～31 天入 queue:stats_recompute 异步（202）"] --> Agg
     Agg --> DS[("daily_stats：每日 × project_id × dimension(total / platform / capability / model / admin / seo_engine / geo_engine) × dimension_key")]
     RT["stats:rt:{date}:{project_id}（service 事件时 HINCRBY）"] -. 今日未聚合时兜底 .-> Overview
-    DS --> Overview["GET /admin/stats/overview（cache:stats:overview:{project_id}:{range} 60s）"]
+    DS --> Overview["GET /admin/stats/overview（cache:stats:overview:{scope_key}:{project_id}:{range} 60s；按用户统计时对其项目行求和）"]
     DS --> Reports["GET /admin/stats/trends / breakdown / rankings / export（cache:stats:trends / breakdown / rankings:{sha1} 300s）"]
     Agg -. 完成后清 cache:stats:* .-> Overview
 ```
@@ -334,14 +334,15 @@ sequenceDiagram
     participant D as MySQL
 
     U->>A: GET /admin/stats/overview?project_id=&range=7d（dashboard.view）
-    A->>R: GET cache:stats:overview:{project_id}:{range}
+    A->>A: get_data_scope → scope_key = all 或 owner:{owner_id}（own 范围或总后台带 owner_id）
+    A->>R: GET cache:stats:overview:{scope_key}:{project_id}:{range}
     alt 命中
         R-->>A: KPI JSON
     else 未命中
-        A->>D: Σ daily_stats(dimension=total) 区间列 + range 末日快照列（links_alive_snapshot / seo_indexed_snapshot …）+ 当前值（COUNT keywords / titles / contents / publish_links 按状态、alerts_open）
-        A->>R: HGETALL stats:rt:{today}:{project_id}（今日尚未聚合时叠加）
+        A->>D: Σ daily_stats(dimension=total) 区间列 + range 末日快照列（links_alive_snapshot / seo_indexed_snapshot …）+ 当前值（COUNT keywords / titles / contents / publish_links 按状态、alerts_open）；owner 范围下 project_id=0 改为对该用户各项目行求和、当前值附加 project_id IN (该用户项目)
+        A->>R: HGETALL stats:rt:{today}:{project_id}（今日尚未聚合时叠加；owner 范围对该用户各项目键求和）
         A->>A: 组装 KPI、环比（7d 对比前 7 天、30d 对比前 30 天、today 对比昨天）、series（ai_calls / cost_cny / links_backfilled / seo_newly_indexed 按日）
-        A->>R: SET cache:stats:overview:{project_id}:{range} EX stats_config.overview_cache_seconds=60
+        A->>R: SET cache:stats:overview:{scope_key}:{project_id}:{range} EX stats_config.overview_cache_seconds=60
     end
     A-->>U: {code: 0, data: {kpi…, series…}}
 ```
@@ -355,7 +356,7 @@ sequenceDiagram
 
 ```mermaid
 flowchart TB
-    Router["app/api 路由层（deps：get_db / get_locale / get_current_admin / require_permission / get_pagination）"] --> Service["app/services 业务层（事务边界、状态机、缓存读写、告警触发、冗余计数）"]
+    Router["app/api 路由层（deps：get_db / get_locale / get_current_admin / require_permission / get_data_scope / get_pagination）"] --> Service["app/services 业务层（事务边界、状态机、缓存读写、告警触发、冗余计数）"]
     Tasks["app/tasks worker 周期任务（薄壳，持 lock:*）"] --> Service
     Service --> Models["app/models.py SQLAlchemy ORM（24 张表 + Literal 枚举常量）"]
     Service --> Providers["app/services/index_providers（SeoProvider / GeoEngine）"]
@@ -374,9 +375,9 @@ flowchart TB
 | 层 / 目录 | 职责 | 硬性规则 |
 | --- | --- | --- |
 | `app/main.py` | `create_app()`：挂载 `api_router`、CORS（`ALLOWED_ORIGINS`）、`register_exception_handlers(app)`、`X-Request-Id` 与审计中间件、`/media` 静态、启动引导（第 4.6 节） | 只做装配，不含业务逻辑 |
-| `app/api`（路由层） | 解析请求 → `require_permission` → 调用 service → 返回 schema；`app/api/__init__.py` 把 `/health` 与 `admin/*` 子路由挂到 `/api/v1`，前缀为 kebab-case 资源名（`/admin/prompt-templates`、`/admin/generation-batches`、`/admin/admin-groups`…），`ai_models.py` / `ai_tasks.py` / `ai_usage.py` / `ai_routes.py` 分别挂到 `/ai/models`、`/ai/tasks`、`/ai/usage`、`/ai` | 不直接写 SQL / Redis；**静态子路径**（`summary` / `export` / `generate` / `import` / `import-file` / `batch-*` / `sync` / `options` / `health` / `probe` / `logs` / `reconcile` / `detect` / `overview` / `runtime` / `tree` / `site-info` / `link-checks` / `index-checks`）必须在同方法 `/{id}` 路由之前注册（Starlette 把 `{id}` 匹配为 `[^/]+`，否则返回 422）；对象级动作 `POST /{resource}/{id}/{action}`，集合级动作 `POST /{resource}/{action}` |
+| `app/api`（路由层） | 解析请求 → `require_permission`（功能权限）→ `get_data_scope`（数据范围，受约束的路由）→ 调用 service（传入 `DataScope`）→ 返回 schema；`app/api/__init__.py` 把 `/health` 与 `admin/*` 子路由挂到 `/api/v1`，前缀为 kebab-case 资源名（`/admin/prompt-templates`、`/admin/generation-batches`、`/admin/admin-groups`…），`ai_models.py` / `ai_tasks.py` / `ai_usage.py` / `ai_routes.py` 分别挂到 `/ai/models`、`/ai/tasks`、`/ai/usage`、`/ai` | 不直接写 SQL / Redis；**静态子路径**（`summary` / `export` / `generate` / `import` / `import-file` / `batch-*` / `sync` / `options` / `owner-options` / `health` / `probe` / `logs` / `reconcile` / `detect` / `overview` / `runtime` / `tree` / `site-info` / `link-checks` / `index-checks`）必须在同方法 `/{id}` 路由之前注册（Starlette 把 `{id}` 匹配为 `[^/]+`，否则返回 422）；对象级动作 `POST /{resource}/{id}/{action}`，集合级动作 `POST /{resource}/{action}` |
 | `app/schemas` | Pydantic v2 请求 / 响应模型，一资源一文件；`common.py` 提供 `PageParams`、`IdList`、`StatusBody`、`ExportParams`（`format=csv` + 筛选参数） | API 字段名 = 列名去掉 `_json` 后缀，值为解码后的 JSON（`default_templates`、`fallback_models`、`params`、`seo_status`、`evidence`…） |
-| `app/services`（业务层） | 事务边界、状态机（`content_service.transition`、`link_check_service.judge`、`media_service` 提交 / 轮询 / 转存状态机）、缓存读写与失效、`alert_service.raise_alert` / `resolve_alert`、冗余计数（`keywords.title_count`、`contents.link_count`、`contents.first_published_at`…）、`stats:rt` 实时计数 | 跨表一致性规则在此实现且**同一事务**完成（权威清单见 [03-data-model](./03-data-model.md) 一致性与事务规则）；JSON 列由 service 编解码 |
+| `app/services`（业务层） | 数据范围谓词（`data_scope_service`：`DataScope`、按 `projects.owner_id` 过滤的查询条件、`get_visible`，[13-user-data-scope](./13-user-data-scope.md) §9；读写受约束表的函数以 `scope` 为必填参数，worker 传 `SYSTEM_SCOPE`）、事务边界、状态机（`content_service.transition`、`link_check_service.judge`、`media_service` 提交 / 轮询 / 转存状态机）、缓存读写与失效、`alert_service.raise_alert` / `resolve_alert`、冗余计数（`keywords.title_count`、`contents.link_count`、`contents.first_published_at`…）、`stats:rt` 实时计数 | 跨表一致性规则在此实现且**同一事务**完成（权威清单见 [03-data-model](./03-data-model.md) 一致性与事务规则）；JSON 列由 service 编解码 |
 | `app/services/ai_gateway_service.py` | 能力路由解析与候选链、熔断器构造、额度预占 / 结算（`check_quota` / `settle_quota`）、尝试行记录、`record_failure` / `finalize_root`、全局暂停、`ensure_default_routes` | 唯一允许调用 `core/zhiqi` 发起生成类计费请求的 service；`ai_catalog_service` / `ai_usage_service` 只调非计费读接口（`/v1/models`、`/api/pricing_new`、`/api/log/token`），健康探测经 `core/zhiqi/health.probe` 发最小文本请求（`max_tokens=8`，记 `trigger_type=health_probe` 的 `ai_tasks`；对账匹配不区分 `trigger_type`，但报表指标与 `quota_reconciled_rate` 的分子分母均排除 `trigger_type=health_probe` 的尝试行） |
 | `app/services/index_providers` | `base.py` 的 `SeoProvider` / `GeoEngine` Protocol 与 `CheckResult`；`zhiqi_web_search` / `baidu_ai_search` / `bing_webmaster` / `google_search_console` / `manual` / `geo_engine` | zhiqi 类提供器经 `ai_gateway_service.complete_text` 调用（同步根任务 + 尝试行），第三方提供器用 httpx 直连 |
 | `app/models.py` | 24 张表 ORM，顶部以 `Literal` 常量声明全部状态枚举（与 `packages/shared/src/enums.ts` 同名同值） | 逻辑外键 + 索引为主；InnoDB 真实外键仅 RBAC 四表与 `content_versions.content_id`、`link_checks.link_id`、`index_checks.link_id`（级联删除），避免跨进程删除死锁 |
@@ -391,7 +392,7 @@ flowchart TB
 | --- | --- |
 | 入口 | Nginx `/api/` → gunicorn / uvicorn → FastAPI `api_router`（`/api/v1`） |
 | 中间件 | CORS（`ALLOWED_ORIGINS`，`DEV_MODE=true` 放宽）；`X-Request-Id`（透传或生成，写入响应头与 `admin_operation_logs.request_id`）；审计中间件：写接口成功后按「方法 + 路径」映射 `action`（集合级 `POST` → `create`、`PUT` → `update`、`PATCH` 与状态类动作 → `update_status`、`DELETE` → `delete`、其余动作 → `execute`、`reset-password` / `change-password` → `reset_password`；`login` / `logout` 由处理函数自行写入；无副作用的 `POST …/preview` 与 `POST /admin/platforms/detect` 设置 `request.state.audit_written=True` 跳过）与 `target_type`（常量 `AUDIT_TARGET_TYPES`：路由前缀 → 类型，最长前缀优先）写 `admin_operation_logs` |
-| 依赖（`app/api/deps.py`） | `get_db`（`SessionLocal`，请求结束关闭）、`get_locale`（`lang` 参数 > `Accept-Language` > `zh-CN`，经 `services/i18n.normalize_locale`）、`get_current_admin`、`require_permission("module.resource.action")`、`get_pagination`（`page` ≥ 1，`page_size` 默认 20、最大 100） |
+| 依赖（`app/api/deps.py`） | `get_db`（`SessionLocal`，请求结束关闭）、`get_locale`（`lang` 参数 > `Accept-Language` > `zh-CN`，经 `services/i18n.normalize_locale`）、`get_current_admin`、`require_permission("module.resource.action")`、`get_data_scope`（读所属用户组 `data_scope` 与查询参数 `owner_id`，返回 `DataScope`；`super_admin` 短路为 `all`，`own` 忽略 `owner_id`）、`get_pagination`（`page` ≥ 1，`page_size` 默认 20、最大 100） |
 | 响应 | `app.core.response.ok(data)` / `fail(code, message, data)` / `paginated(items, total, page, page_size)` → `{code, message, data}`，`code=0` 成功；分页 `data={items, total, page, page_size}` |
 | 异常 | `BusinessError(message, code=400, http_status=400, data=None)`；`register_exception_handlers` 把 `BusinessError`、请求校验错误（400 + 错误列表）、未捕获异常（500，`DEV_MODE` 带堆栈）统一为响应结构；业务码 `400 / 401 / 403 / 404 / 409 / 429 / 4221 / 4222 / 4291 / 5021 / 5031 / 500` 的含义与 `data` 结构见 [04-api-spec](./04-api-spec.md) |
 | CSV 导出 | `GET …/export` 输出 UTF-8 BOM CSV，最多 50,000 行，超出返回 400；列表导出沿用资源 `view` 权限，内容全文导出与报表导出使用独立权限 |
@@ -575,8 +576,8 @@ def main() -> None:
 | `cache:settings:runtime` | JSON | `GET /admin/settings/runtime` 的非敏感子集 | 60s |
 | `cache:platforms:all` | JSON | 平台与规则列表 | 300s |
 | `cache:routes:{capability}:{project_id}` | JSON | `resolve_route` 结果（主 / 备 / 参数 / 超时） | 60s |
-| `cache:stats:overview:{project_id}:{range}` | JSON | 总览 KPI | `stats_config.overview_cache_seconds`（60s） |
-| `cache:stats:trends:{sha1(query)}` / `cache:stats:breakdown:{sha1}` / `cache:stats:rankings:{sha1}` | JSON | 报表查询缓存 | 300s |
+| `cache:stats:overview:{scope_key}:{project_id}:{range}` | JSON | 总览 KPI；`scope_key` = `all`（总后台未按用户筛选）或 `owner:{owner_id}`（普通用户本人或总后台的用户视角，[13-user-data-scope](./13-user-data-scope.md) §10.4） | `stats_config.overview_cache_seconds`（60s） |
+| `cache:stats:trends:{sha1(query)}` / `cache:stats:breakdown:{sha1}` / `cache:stats:rankings:{sha1}` | JSON | 报表查询缓存（规范化查询串含 `scope_key`） | 300s |
 | `cache:ai:models:catalog` | JSON | 模型目录（`model_id` → `owned_by` / `supported_endpoint_types`），供 `catalog.protocol_for` 协议预选：由 `ai_catalog_service` 维护，`sync_models` 步骤 ④ 以 `GET /v1/models` 结果覆盖写；读取统一经 `ai_catalog_service.catalog_entry(db, model_id)`，键缺失（Redis 重启、清缓存、关闭定时同步后过期）时从 `ai_models` 的 `is_available=1` 行重建并以同 TTL 回填，回填后仍无该模型返回 `None`（`protocol_for` 按「目录缺失」返回 `preferred`） | `max(ai_routing_config.catalog.sync_interval_seconds, 3600) + 600`（默认 4200s，始终长于同步间隔，两次同步之间不会过期） |
 | `cache:ai:models:options:{modality}:{is_available}` | JSON | `GET /admin/ai/models/options` 结果（`sync_models` 后清除） | 60s |
 | `ai:usage:last_pull` | JSON `{pulled_at, pulled, new, matched, unmatched, window_overflow, request_ids[]}` | 最近一次对账拉取摘要（用量页展示） | 86400s |
@@ -594,6 +595,7 @@ def main() -> None:
 | `POST/PUT/DELETE /admin/platforms*` | `cache_delete("cache:platforms:all")` |
 | `sync_models` 完成 | `cache_delete_prefix("cache:ai:models:")` 后重建 `cache:ai:models:catalog` |
 | `aggregate_daily_stats` 完成 | 清 `cache:stats:*` |
+| 项目创建、删除、转移负责人（`PUT /admin/projects/{id}` 改 `owner_id`） | 提交后清 `cache:stats:*`（可见项目集变化） |
 | 写入 `queued:*` / `limit:*` / `quota:*` / `stats:rt:*` / `mock:usage_logs` | 每次写入后 `EXPIRE`（第 6 节 TTL 统一规则） |
 
 ## 8. 鉴权与权限
@@ -608,6 +610,7 @@ def main() -> None:
 | 失败锁定 | `rate:admin_login:{username}` 15 分钟内失败 ≥ 5 次拒绝登录 |
 | 前端 | `store/auth.ts` 持久化 token 与权限码，刷新时调 `GET /admin/auth/me`；`api/client.ts` 统一加 `Authorization: Bearer`，401 清登录态跳转登录（登录请求本身的 401 交给登录页展示），403 时 `data.permission` 存在 → 提示「无权执行此操作」并刷新权限，`data` 为 null（安全规则拒绝）→ 直接展示后端 `message`、不刷新权限（[07-admin-rbac](./07-admin-rbac.md) §9.6） |
 | 公开接口 | 仅 `POST /admin/auth/login`、`GET /admin/auth/site-info`、`GET /api/v1/health`、`GET /media/{key}`；「已登录即可」接口：`GET /admin/auth/me`、`POST /admin/auth/logout`、`POST /admin/auth/change-password`、`GET /admin/settings/runtime` |
+| 数据范围 | 登录与 `GET /admin/auth/me` 返回 `data_scope`（取所属用户组）；受约束的接口在 `require_permission` 之后经 `get_data_scope` 按项目负责人过滤：`own` 只见本人项目及其下数据，`all`（总后台）见全部、可用 `owner_id` 收窄；范围外对象一律 404（[13-user-data-scope](./13-user-data-scope.md)） |
 
 ### 8.2 请求鉴权流程
 
@@ -625,7 +628,8 @@ sequenceDiagram
     U->>A: GET /admin/keywords?project_id=1（Authorization: Bearer，lang）
     A->>A: get_current_admin：decode_token(HS256, aud=admin) → 查 admins → is_active=1 且 ver == token_version，否则 401 → 查所属 admin_groups：is_active=1，否则 401「管理员用户组已停用」
     A->>A: require_permission("content.keywords.view")：has_permission(admin, code) 按用户组授权判定，否则 403，写 request.state.permission_code
-    A->>D: keyword_service 查询 → paginated()
+    A->>A: get_data_scope：读所属用户组 data_scope（own → owner_id=本人；all → 查询参数 owner_id 或不筛选）
+    A->>D: keyword_service 查询（附加 project_id IN (SELECT id FROM projects WHERE owner_id = ?)，own 或带 owner_id 时）→ paginated()
     A-->>U: {code: 0, message, data: {items, total, page, page_size}}（响应头 X-Request-Id）
     Note over A,D: 写接口成功后审计中间件按「方法 + 路径」映射 action / target_type / target_id 写 admin_operation_logs（不记录密码 / 密钥 / 令牌）
 ```
@@ -634,7 +638,8 @@ sequenceDiagram
 
 - 权限码格式 `module.resource.action`，两级：`menu` 型 `*.view`（菜单与页面）与 `action` 型（`parent_code` 指向同资源 `view`）；共 90 个，模块 `dashboard` / `content` / `media` / `ai` / `publish` / `monitoring` / `stats` / `system` / `security`，定义在 `app/core/admin_permissions.py`（`PERMISSIONS` / `PERMISSION_CODES` / `PERMISSION_DEPENDENCIES` / `SYSTEM_GROUPS` / `OPERATOR_EXCLUDED` / `DEFAULT_GROUP_PERMISSIONS`），由迁移 `0002_seed_permissions` 与 `ensure_rbac_seed` 写入 `admin_permissions`，后台不可新增。
 - 授权以数据库用户组为准：`admins.group_id` → `admin_groups` → `admin_group_permissions`；拥有任一 action 必须同时拥有同资源 `view`，跨资源依赖（如 `content.keywords.generate` 隐含 `content.batches.view`，`media.images.generate` 隐含 `media.assets.view`）在 `PUT /admin/admin-groups/{id}/permissions` 保存时自动补齐。
-- 系统用户组 `super_admin`（全部权限）/ `operator`（生成、编辑、回填、监控处理）/ `reviewer`（审核 + 查看）/ `read_only`（`*.view` + `stats.reports.export`，不含 `security.*` 与 `system.settings.view`）；自定义组 `code` 为服务端生成的 `custom_{uuid4().hex[:12]}`。
+- 系统用户组 `super_admin`（全部权限，数据范围固定 `all`）/ `operator`（生成、编辑、回填、监控处理，默认 `own`）/ `reviewer`（审核 + 查看，默认 `all`）/ `read_only`（`*.view` + `stats.reports.export`，不含 `security.*` 与 `system.settings.view`，默认 `all`）；自定义组 `code` 为服务端生成的 `custom_{uuid4().hex[:12]}`，数据范围缺省 `own`。
+- 数据范围 `admin_groups.data_scope` 与权限码正交：权限码决定能做什么，数据范围决定能看到谁的数据（[13-user-data-scope](./13-user-data-scope.md)）。
 - 每个接口绑定**单一静态权限码**（`require_permission` 参数），列表 CSV 导出沿用资源 `view`，仅 `content.contents.export` 与 `stats.reports.export` 为独立导出权限。前端：路由 `meta.permission` 守卫、`Layout.vue` 菜单按 `*.view` 过滤、`v-permission` 指令与 `usePermission()` 控制按钮。完整权限码表、默认授权与安全规则见 [07-admin-rbac](./07-admin-rbac.md)。
 
 ### 8.4 审计与安全规则
@@ -658,6 +663,7 @@ sequenceDiagram
 | 环境变量、docker-compose、Nginx、发布与备份 | [05-deployment](./05-deployment.md) |
 | 本地启动与 Mock 验证 | [06-getting-started](./06-getting-started.md) |
 | 权限码全表与用户组 | [07-admin-rbac](./07-admin-rbac.md) |
+| 用户系统、数据范围与数据隔离 | [13-user-data-scope](./13-user-data-scope.md) |
 | zhiqiapi 适配层、错误分类、`ai_tasks` 状态机、对账 | [08-zhiqiapi-integration](./08-zhiqiapi-integration.md) |
 | 关键词 / 标题 / 内容生成、Prompt 模板、内容状态机 | [09-generation-pipeline](./09-generation-pipeline.md) |
 | 图片 / 视频任务生命周期与转存 | [10-media-generation](./10-media-generation.md) |

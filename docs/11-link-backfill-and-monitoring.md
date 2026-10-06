@@ -80,11 +80,11 @@ flowchart LR
 
 | 序 | 校验 | 失败 |
 | --- | --- | --- |
-| 1 | 内容存在且 `contents.status ∈ {approved, published}` | 404 / 409 `data.current_status` |
+| 1 | 内容存在、对回填人可见（数据范围，[13-user-data-scope](./13-user-data-scope.md)：普通用户只能回填本人负责项目的内容）且 `contents.status ∈ {approved, published}` | 404 / 409 `data.current_status` |
 | 2 | 内容所属项目 `projects.status=active` | 409 |
 | 3 | `safe_fetch.normalize_public_url(url, allow_http=monitoring_config.link_check.allow_http)`：scheme 只允许 `http`/`https`、禁止 userinfo、端口只允许 80/443/缺省、拒绝 `javascript:`/`file:`/`data:` 等、主机名 IDNA 小写化；**不做 DNS** | 400 `data=[{"loc":["body","url"],"msg":"…","type":"value_error","input":"ftp://example.com/a"}]` |
 | 4 | `platform_id` 缺省 → `platform_service.detect(url)`（§4.3）；给定时平台须存在且 `is_active=1` | 404 / 409 |
-| 5 | `url_hash = urls.url_hash(urls.normalize_url(url))` 唯一 | 409 `data.existing_id` = 已存在链接 ID（前端提示「该链接已回填」并可跳转详情） |
+| 5 | `url_hash = urls.url_hash(urls.normalize_url(url))` 唯一（全局，跨用户） | 409 `data.existing_id` = 已存在链接 ID（前端提示「该链接已回填」并可跳转详情）；已存在链接对回填人不可见（属于其他用户的项目）时 `data={"existing_id":null,"reason":"owned_by_other"}`，前端提示「该链接已由其他用户回填」，不暴露对方链接 |
 | 6 | `published_at` 缺省取当前时间；不得晚于当前时间 + 5 分钟（容忍时钟偏差）；不得早于当前时间 − 3650 天（防年份笔误）；**允许早于内容 `created_at`**（支持登记历史文章、补录早已发布的链接） | 400 `data=[{"loc":["body","published_at"],"msg":"…","type":"value_error","input":"2061-10-06T03:00:00Z"}]` |
 | 7 | `publish_account` ≤ 100 字符、`note` ≤ 500 字符 | 400 |
 
@@ -891,7 +891,7 @@ def deliver(alert: Alert, event: str) -> list[str]: ...   # 返回成功投递�
 
 ### 10.4 通知通道（首版站内，webhook / 邮件预留）
 
-`deliver(alert, event)` 在产生告警的事务**提交后**执行（worker 线程内），按 `channels` 逐通道投递；`severity` 低于通道 `min_severity` 不投递；冷却期内不投递；成功的通道追加到 `notified_channels_json`；失败只记 WARNING 日志，不重试、不影响告警落库。
+`deliver(alert, event)` 在产生告警的事务**提交后**执行（worker 线程内），按 `channels` 逐通道投递（通道为总后台通道，投递全部用户的告警，不按用户分发）；`severity` 低于通道 `min_severity` 不投递；冷却期内不投递；成功的通道追加到 `notified_channels_json`；失败只记 WARNING 日志，不重试、不影响告警落库。
 
 | 通道 | 实现 | 预留配置 |
 | --- | --- | --- |
@@ -983,7 +983,7 @@ def deliver(alert: Alert, event: str) -> list[str]: ...   # 返回成功投递�
 
 ### 11.7 告警中心（`views/alerts/Index.vue`）与铃铛
 
-摘要卡片（`GET /alerts/summary`）：按 severity 的 `open`/`acknowledged` 数、今日新增/解决。列表列：severity、类型、标题、目标（`target_type` + 跳转：`publish_link` → 链接详情，`ai_model` → 「AI 网关 → 能力路由」页（`/ai/routes`），`media_asset` → 素材库）、项目、`trigger_count`、首次/最近触发、状态、处理人；筛选 `status`/`severity`/`alert_type`/`project_id`/`target_type`/`target_id`/`start`/`end`（`target_id` 通常由链接详情时间线跳转带入，§11.3）。操作：确认（`acknowledge`）、解决（`resolve`，填 `note`）、忽略（`ignore`）、批量解决（`batch-resolve`），均需 `monitoring.alerts.handle`。`components/AlertBadge.vue` 在顶栏显示未处理数（`store/alerts.ts` 仅在 `has('monitoring.alerts.view')` 为真时启动 60s 轮询）；`Dashboard.vue` 的告警摘要块同条件渲染。
+摘要卡片（`GET /alerts/summary`）：按 severity 的 `open`/`acknowledged` 数、今日新增/解决。列表列：severity、类型、标题、目标（`target_type` + 跳转：`publish_link` → 链接详情，`ai_model` → 「AI 网关 → 能力路由」页（`/ai/routes`），`media_asset` → 素材库）、项目、`trigger_count`、首次/最近触发、状态、处理人；筛选 `status`/`severity`/`alert_type`/`project_id`/`target_type`/`target_id`/`start`/`end`（`target_id` 通常由链接详情时间线跳转带入，§11.3）。操作：确认（`acknowledge`）、解决（`resolve`，填 `note`）、忽略（`ignore`）、批量解决（`batch-resolve`），均需 `monitoring.alerts.handle`。数据范围（[13-user-data-scope](./13-user-data-scope.md) §11）：告警按 `alerts.project_id` 归属项目负责人——业务告警（`link_*`、`index_overdue`、`media_task_failed`）必须写 `project_id`，普通用户的告警中心、摘要卡片与铃铛只含本人项目的告警；`project_id` 为空的系统告警（`ai_*`、`worker_stale`）只对总后台可见。`components/AlertBadge.vue` 在顶栏显示未处理数（`store/alerts.ts` 仅在 `has('monitoring.alerts.view')` 为真时启动 60s 轮询）；`Dashboard.vue` 的告警摘要块同条件渲染。
 
 ### 11.8 内容编辑器的链接面板（`views/contents/Editor.vue`）
 
@@ -1208,9 +1208,10 @@ Content-Type: application/json
 7. GEO 引用检测按 `geo_engines` 配置逐引擎经 zhiqiapi 提问，以引擎自身模型/协议调用，解析回答中的引用按 URL/域名判定 `cited`/`not_cited`/`unknown`（标题近似仅在引擎显式配置 `parse.match_mode=title` 时启用；回答无任何引用记 `unknown`）并保存引用片段；共享域名平台不因域名命中误判。
 8. 收录检测排程符合 §7.5（第 1/3/7/14/30 天，之后每月，已收录每 90 天降频复核，单引擎 ≤ 24 轮，日上限 2000），`index_checks_done` 只计实际完成的 scheduled 轮次。
 9. 告警规则、去重、冷却、状态流转符合 §10；告警中心可确认/解决/忽略/批量解决；铃铛 60s 更新；webhook/邮件通道配置可保存但默认关闭。
-10. 后台页面（平台、链接列表与详情时间线、删除/收录检测记录、告警中心、四个配置 Tab）功能完整，权限与 `read_only`/`reviewer`/`operator` 默认授权一致。
-11. 不抓取搜索引擎结果页 HTML；密钥只在环境变量；所有操作可在操作日志追溯。
-12. Mock 模式冒烟脚本全流程通过：收录检测结果非 `unknown`；公网 404 链接基线为 `suspected_deleted`、手动检测后为 `deleted`，产生的 `link_deleted` 告警可确认、解决；报表收录率/引用率非 null 且 > 0。
+10. 数据范围：普通用户只能回填、查看、检测本人负责项目的链接，检测记录与告警同样隔离；回填其他用户已回填的 URL 返回 `reason=owned_by_other` 且不暴露链接 ID；总后台看全部（[13-user-data-scope](./13-user-data-scope.md) §17）。
+11. 后台页面（平台、链接列表与详情时间线、删除/收录检测记录、告警中心、四个配置 Tab）功能完整，权限与 `read_only`/`reviewer`/`operator` 默认授权一致。
+12. 不抓取搜索引擎结果页 HTML；密钥只在环境变量；所有操作可在操作日志追溯。
+13. Mock 模式冒烟脚本全流程通过：收录检测结果非 `unknown`；公网 404 链接基线为 `suspected_deleted`、手动检测后为 `deleted`，产生的 `link_deleted` 告警可确认、解决；报表收录率/引用率非 null 且 > 0。
 
 ## 18. 实施顺序
 
