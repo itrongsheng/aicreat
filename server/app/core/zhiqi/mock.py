@@ -284,7 +284,8 @@ def _gen_outline(text: str) -> str:
 
 
 def _is_html(text: str) -> bool:
-    return bool(re.search(r"(输出格式|format)\s*[:：=]\s*html", text, re.IGNORECASE))
+    # 只看「输出格式：html」这类参数行；系统模板说明里的「format=html 时……」不算
+    return bool(re.search(r"(输出格式|format)\s*[:：]\s*html", text, re.IGNORECASE))
 
 
 def _gen_content(text: str) -> str:

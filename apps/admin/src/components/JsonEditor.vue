@@ -11,11 +11,13 @@ const props = withDefaults(
     readonly?: boolean;
     /** 只接受 JSON 对象（settings 配置值） */
     objectOnly?: boolean;
+    /** 与 objectOnly 同用：允许留空（回写 null），如模板可选的 output_schema */
+    nullable?: boolean;
     /** 后端 400 校验错误（04 §5.1） */
     errors?: ValidationErrorItem[];
     placeholder?: string;
   }>(),
-  { rows: 18, readonly: false, objectOnly: false, errors: () => [], placeholder: "" },
+  { rows: 18, readonly: false, objectOnly: false, nullable: false, errors: () => [], placeholder: "" },
 );
 
 const emit = defineEmits<{
@@ -58,6 +60,7 @@ watch(
 function parse(source: string): { ok: true; value: unknown } | { ok: false; message: string } {
   try {
     const value: unknown = source.trim() === "" ? null : JSON.parse(source);
+    if (value === null && props.nullable) return { ok: true, value: null };
     if (props.objectOnly && (value === null || typeof value !== "object" || Array.isArray(value))) {
       return { ok: false, message: t("settings.jsonMustBeObject") };
     }

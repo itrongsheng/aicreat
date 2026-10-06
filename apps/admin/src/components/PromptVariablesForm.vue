@@ -197,6 +197,7 @@ defineExpose({ validate });
             size="small"
             :disabled="readonly"
             class="mono-input"
+            maxlength="50"
             :placeholder="t('promptVars.namePlaceholder')"
             @update:model-value="(v: string) => update($index, { name: v.trim() })"
           />
@@ -206,12 +207,12 @@ defineExpose({ validate });
       </el-table-column>
       <el-table-column :label="t('promptVars.label')" min-width="120">
         <template #default="{ row, $index }">
-          <el-input :model-value="row.label ?? ''" size="small" :disabled="readonly" @update:model-value="(v: string) => update($index, { label: v })" />
+          <el-input :model-value="row.label ?? ''" size="small" maxlength="50" :disabled="readonly" @update:model-value="(v: string) => update($index, { label: v })" />
         </template>
       </el-table-column>
       <el-table-column :label="t('promptVars.required')" width="70" align="center">
         <template #default="{ row, $index }">
-          <el-checkbox :model-value="!!row.required" :disabled="readonly" @update:model-value="(v) => update($index, { required: !!v })" />
+          <el-checkbox :model-value="!!row.required" :disabled="readonly" @update:model-value="(v: string | number | boolean) => update($index, { required: !!v })" />
         </template>
       </el-table-column>
       <el-table-column :label="t('promptVars.default')" min-width="160">
@@ -219,6 +220,7 @@ defineExpose({ validate });
           <el-input
             :model-value="row.default == null ? '' : String(row.default)"
             size="small"
+            maxlength="4000"
             :disabled="readonly"
             @update:model-value="(v: string) => update($index, { default: v })"
           />

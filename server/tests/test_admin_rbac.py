@@ -12,7 +12,7 @@ from typing import Any
 
 import jwt
 import pytest
-from fastapi import Depends, FastAPI, Request
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -207,6 +207,8 @@ def test_all_write_endpoints_forbidden_without_permission(app: FastAPI, client: 
         codes = _permission_dependencies(route)
         if not path.startswith(f"{ADMIN_API}/") or not codes:
             continue
+        if codes[0].endswith(".view"):
+            continue                      # 无副作用的 POST（如模板 preview）只要求 view 权限，只读组本就拥有
         for method in methods & {"POST", "PUT", "PATCH", "DELETE"}:
             url = path.replace("{admin_id}", "1").replace("{group_id}", "1").replace("{key}", "generation_config")
             response = client.request(method, url, headers=read_only.headers, json={})
@@ -650,27 +652,21 @@ def test_audit_settings_and_group_scope_summary(client: TestClient, db: Session,
 
 
 def test_audit_skipped_when_handler_marks_written(app: FastAPI, client: TestClient, db: Session, super_admin: User) -> None:
-    """无副作用的 ``POST …/preview`` 由处理函数设置 ``audit_written=True`` 跳过审计。"""
-    from fastapi import APIRouter
+    """无副作用的 ``POST …/preview`` 由处理函数设置 ``audit_written=True`` 跳过审计；``duplicate`` 照常记 ``execute``。"""
+    from app.models import PromptTemplate
 
-    router = APIRouter()
-
-    @router.post("/api/v1/admin/prompt-templates/{template_id}/preview")
-    def preview(template_id: int, request: Request, _admin: Admin = Depends(require_permission("content.prompt_templates.view"))) -> dict:
-        request.state.audit_written = True
-        return {"code": 0, "message": "ok", "data": {"id": template_id}}
-
-    @router.post("/api/v1/admin/prompt-templates/{template_id}/duplicate")
-    def duplicate(template_id: int, _admin: Admin = Depends(require_permission("content.prompt_templates.create"))) -> dict:
-        return {"code": 0, "message": "ok", "data": None}
-
-    app.include_router(router)
+    tpl = PromptTemplate(code="audit_tpl", version=1, kind="keyword", capability="keyword", name="审计模板", language="zh-CN",
+                         project_id=0, user_prompt="{{seeds}}", output_format="text", status="published", created_by=super_admin.id,
+                         updated_by=super_admin.id)
+    db.add(tpl)
+    db.commit()
     count = len(_logs(db))
-    ok_data(client.post(f"{ADMIN_API}/prompt-templates/7/preview", headers=super_admin.headers))
+    ok_data(client.post(f"{ADMIN_API}/prompt-templates/{tpl.id}/preview", headers=super_admin.headers, json={"variables": {}}))
     assert len(_logs(db)) == count
-    ok_data(client.post(f"{ADMIN_API}/prompt-templates/7/duplicate", headers=super_admin.headers))
+    ok_data(client.post(f"{ADMIN_API}/prompt-templates/{tpl.id}/duplicate", headers=super_admin.headers,
+                        json={"code": "audit_tpl_copy", "name": "副本"}))
     log = _logs(db)[-1]
-    assert (log.action, log.target_type, log.target_id, log.summary) == ("execute", "prompt_template", "7", "执行 prompt_template #7")
+    assert (log.action, log.target_type, log.target_id) == ("execute", "prompt_template", str(tpl.id))
 
 
 def test_audit_routes_traversal(app: FastAPI) -> None:

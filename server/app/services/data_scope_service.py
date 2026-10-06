@@ -40,6 +40,7 @@ from app.models import (
 )
 
 __all__ = [
+    "MAX_BIGINT",
     "DataScope",
     "DataScopeValue",
     "SYSTEM_SCOPE",
@@ -267,9 +268,17 @@ def is_visible(db: Session, scope: DataScope, obj: Any) -> bool:
     return True
 
 
+MAX_BIGINT = 2**63 - 1
+
+
+def _id_in_range(obj_id: Any) -> bool:
+    """超出 BIGINT 范围的整数 ID 不可能存在（直接按不存在处理，避免 SQLite 绑定参数时 ``OverflowError``）。"""
+    return not isinstance(obj_id, int) or -MAX_BIGINT - 1 <= obj_id <= MAX_BIGINT
+
+
 def get_visible(db: Session, scope: DataScope, model: type[T], obj_id: Any, *, message: str = NOT_FOUND_MESSAGE) -> T:
     """读取对象并判断可见性；不存在或不可见都抛 ``BusinessError("对象不存在", code=404, http_status=404)``。"""
-    obj = db.get(model, obj_id) if obj_id is not None else None
+    obj = db.get(model, obj_id) if obj_id is not None and _id_in_range(obj_id) else None
     if obj is None or not is_visible(db, scope, obj):
         raise BusinessError(message, code=CODE_NOT_FOUND, http_status=404)
     return obj

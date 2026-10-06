@@ -402,6 +402,12 @@ export interface PromptTemplate {
   updated_by: number | null;
   created_at: string;
   updated_at: string;
+  /**
+   * 草稿保存（新建、编辑、published 复制为新版本、duplicate）的返回附带：未声明且非内置变量的告警
+   * （`type=unknown_variable`，`loc=["body","system_prompt"|"user_prompt"]`，`input` 为变量名）；
+   * 草稿只告警、`publish` 时同样的问题返回 400（docs/09 §5.3）
+   */
+  warnings?: ValidationErrorItem[];
 }
 
 /** `POST /admin/prompt-templates/{id}/preview` */
@@ -420,6 +426,8 @@ export interface BatchTaskSummary {
   operation: AiTaskOperation;
   target_type: AiTaskTargetType | null;
   target_id: number | null;
+  /** 重试根任务指向被重试的旧根任务；首次创建为 null */
+  parent_task_id?: number | null;
   status: AiTaskStatus;
   model: string | null;
   /** 根任务 `input.model`（请求级覆盖模型），未覆盖为 null */
@@ -1674,4 +1682,153 @@ export type PromptTemplateUpdateBody = Partial<Omit<PromptTemplateCreateBody, "c
 export interface PromptTemplateDuplicateBody {
   code: string;
   name: string;
+  /** 复制到的范围（0 = 全局，>0 = 项目）；省略沿用源模板（从系统模板派生项目模板时指定） */
+  project_id?: number;
 }
+
+// =====================================================================
+// 关键词 / 标题 / 内容 / 批次的请求体（04 §6.9~§6.12、§7.4~§7.7；09 §6~§8）
+// =====================================================================
+import type { RewriteMode, RewriteScope } from "./enums";
+
+/** 关键词 / 标题的状态动作 */
+export type AdoptAction = "adopt" | "discard" | "restore";
+
+/** `POST /admin/keywords/generate`（`schemas/keyword.py::KeywordGenerateBody`） */
+export interface KeywordGenerateBody {
+  project_id: number;
+  seeds: string[];
+  count: number;
+  competitors?: string[];
+  audience?: string | null;
+  template_id?: number | null;
+  model?: string | null;
+}
+
+/** `POST /admin/keywords`（手工新增） */
+export interface KeywordCreateBody {
+  project_id: number;
+  keyword: string;
+  intent: KeywordIntent;
+  keyword_type: KeywordType;
+}
+
+/** `PUT /admin/keywords/{id}`；状态不可在此修改 */
+export interface KeywordUpdateBody {
+  keyword?: string;
+  intent?: KeywordIntent;
+  keyword_type?: KeywordType;
+  difficulty?: number | null;
+  heat?: number | null;
+  score?: number | null;
+  tags?: string[];
+}
+
+/** `POST /admin/keywords/import` 的一项 */
+export interface KeywordImportItem {
+  keyword: string;
+  intent: KeywordIntent | string;
+  keyword_type: KeywordType | string;
+}
+
+/** `POST /admin/titles/generate`（`schemas/title.py::TitleGenerateBody`） */
+export interface TitleGenerateBody {
+  project_id: number;
+  keyword_ids: number[];
+  count: number;
+  style: ContentStyle;
+  template_id?: number | null;
+  model?: string | null;
+}
+
+/** `POST /admin/titles`（手工新增，`source=manual`） */
+export interface TitleCreateBody {
+  keyword_id: number;
+  title: string;
+  style: ContentStyle;
+}
+
+/** `PUT /admin/titles/{id}` */
+export interface TitleUpdateBody {
+  title: string;
+  style?: ContentStyle;
+}
+
+/** `POST /admin/contents`（手工创建草稿） */
+export interface ContentCreateBody {
+  project_id: number;
+  title: string;
+  title_id?: number | null;
+  keyword_id?: number | null;
+  format: ContentFormat;
+  style: ContentStyle;
+  body?: string | null;
+}
+
+/** `POST /admin/contents/generate`（`schemas/content.py::ContentGenerateBody`） */
+export interface ContentGenerateBody {
+  project_id: number;
+  title_ids: number[];
+  template_id?: number | null;
+  outline_first: boolean;
+  target_word_count: number;
+  include_faq: boolean;
+  include_seo_meta: boolean;
+  format: ContentFormat;
+  model?: string | null;
+}
+
+/** `PUT /admin/contents/{id}`：人工编辑版本化字段；`current_version_id` 用于并发冲突检查（09 §12） */
+export interface ContentUpdateBody {
+  title?: string;
+  body?: string | null;
+  outline?: OutlineItem[] | null;
+  summary?: string | null;
+  seo_title?: string | null;
+  seo_description?: string | null;
+  seo_keywords?: string[] | null;
+  faq?: FaqItem[] | null;
+  current_version_id?: number | null;
+}
+
+/** `POST /admin/contents/{id}/generate-outline` */
+export interface ContentOutlineBody {
+  template_id?: number | null;
+  model?: string | null;
+}
+
+/** `POST /admin/contents/{id}/generate-body` */
+export interface ContentBodyBody {
+  segmented?: boolean;
+  template_id?: number | null;
+  model?: string | null;
+}
+
+/** `POST /admin/contents/{id}/generate-seo` */
+export interface ContentSeoBody {
+  include_faq?: boolean;
+  template_id?: number | null;
+  model?: string | null;
+}
+
+/** `POST /admin/contents/{id}/rewrite`（`schemas/content.py::RewriteBody`） */
+export interface ContentRewriteBody {
+  mode: RewriteMode;
+  scope: RewriteScope;
+  /** `scope=section` 必填，1 起，对应 `outline` 顺序 */
+  section_index?: number | null;
+  /** `restyle` 必填 */
+  style?: ContentStyle | null;
+  instruction?: string | null;
+  template_id?: number | null;
+  model?: string | null;
+}
+
+/** `POST /admin/contents/{id}/assets/{asset_id}/attach` */
+export interface ContentAttachBody {
+  usage_type: "cover" | "inline";
+  sort?: number;
+}
+
+/** `GET /admin/contents/{id}/export?format=` */
+export type ContentExportFormat = "md" | "html" | "json";

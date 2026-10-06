@@ -154,7 +154,36 @@ def unregister_handler(operation: str) -> None:
 
 
 def get_handler(operation: str) -> HandlerSpec | None:
-    return REGISTRY.get(operation)
+    spec = REGISTRY.get(operation)
+    if spec is None:
+        load_handlers()
+        spec = REGISTRY.get(operation)
+    return spec
+
+
+# 在模块导入时调用 register_handler 的业务模块（worker 进程不经路由导入它们，按需加载；不存在的模块跳过）
+HANDLER_MODULES: tuple[str, ...] = (
+    "app.services.generation_service",
+    "app.services.keyword_service",
+    "app.services.title_service",
+    "app.services.content_service",
+    "app.services.media_service",
+)
+_handlers_loaded = False
+
+
+def load_handlers() -> None:
+    """导入 ``HANDLER_MODULES`` 中已存在的模块以完成处理器注册（幂等；单个模块导入失败只记日志）。"""
+    global _handlers_loaded
+    if _handlers_loaded:
+        return
+    _handlers_loaded = True
+    for name in HANDLER_MODULES:
+        try:
+            if importlib.util.find_spec(name) is not None:
+                importlib.import_module(name)
+        except Exception:  # noqa: BLE001
+            logger.exception("加载任务处理器模块失败：%s", name)
 
 
 def set_batch_finished_hook(fn: BatchFinishedHook | None) -> None:
@@ -315,7 +344,7 @@ def claim(db: Session, task_id: int, worker_id: str | None = None) -> bool:
 
 def dispatch(ctx: TaskContext) -> TaskOutcome:
     """按根任务 ``operation`` 分派到已注册的处理器；未注册 → ``failed(unknown)``。"""
-    spec = REGISTRY.get(ctx.task.operation)
+    spec = get_handler(ctx.task.operation)
     if spec is None:
         return TaskOutcome(status="failed", error_category="unknown", error_message=f"未注册的任务类型：{ctx.task.operation}")
     return spec.execute(ctx) or TaskOutcome()
@@ -363,7 +392,7 @@ def _process(db: Session, task_id: int, worker_id: str) -> bool:
     root = db.get(AiTask, task_id)
     if root is None or root.root_task_id is not None or root.status != "running" or root.locked_by != worker_id:
         return False
-    spec = REGISTRY.get(root.operation)
+    spec = get_handler(root.operation)
     ctx = TaskContext(db, root, worker_id)
     heartbeat = Heartbeat(task_id, worker_id).start()
     raised = False
@@ -803,7 +832,7 @@ def retry_task(db: Session, scope: DataScope, task_id: int, *, admin_id: int | N
                 batch.status = "running"
                 batch.finished_at = None
                 batch.heartbeat_at = utcnow()
-        spec = REGISTRY.get(task.operation)
+        spec = get_handler(task.operation)
         if spec and spec.before_retry:
             spec.before_retry(db, task, new_task)
         db.commit()
@@ -829,7 +858,7 @@ def cancel_task(db: Session, scope: DataScope, task_id: int, *, admin_id: int | 
     current = db.scalar(select(AiTask.status).where(AiTask.id == task.id))  # 读最新状态（worker 可能刚领取）
     if current not in ("queued", "polling"):
         raise _conflict("当前状态不可取消", {"current_status": current})
-    spec = REGISTRY.get(task.operation)
+    spec = get_handler(task.operation)
     try:
         if spec and spec.on_cancelled:
             spec.on_cancelled(db, task)
@@ -1273,6 +1302,7 @@ def health_snapshot(db: Session) -> dict[str, Any]:
 
 __all__ = [
     "AI_TASK_EXPORT_COLUMNS",
+    "HANDLER_MODULES",
     "REGISTRY",
     "HandlerSpec",
     "Heartbeat",
@@ -1287,6 +1317,7 @@ __all__ = [
     "export_tasks",
     "failed_probe_result",
     "get_handler",
+    "load_handlers",
     "get_task_detail",
     "health_snapshot",
     "list_tasks",

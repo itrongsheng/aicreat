@@ -15,9 +15,14 @@ from app.api.admin import (
     ai_routes,
     ai_tasks,
     ai_usage,
+    contents,
+    generation_batches,
+    keywords,
     operation_logs,
     projects,
+    prompt_templates,
     settings,
+    titles,
 )
 from app.api.admin import auth as admin_auth
 
@@ -32,6 +37,11 @@ admin.include_router(admin_permissions.router, prefix="/admin-permissions", tags
 admin.include_router(operation_logs.router, prefix="/admin-operation-logs", tags=["admin-rbac"])
 admin.include_router(settings.router, prefix="/settings", tags=["system"])
 admin.include_router(projects.router, prefix="/projects", tags=["content"])
+admin.include_router(prompt_templates.router, prefix="/prompt-templates", tags=["content"])
+admin.include_router(keywords.router, prefix="/keywords", tags=["content"])
+admin.include_router(titles.router, prefix="/titles", tags=["content"])
+admin.include_router(contents.router, prefix="/contents", tags=["content"])
+admin.include_router(generation_batches.router, prefix="/generation-batches", tags=["content"])
 # AI 网关：/ai/models、/ai/tasks、/ai/usage 先于 /ai（ai_routes 的 /routes…、/health…）挂载
 admin.include_router(ai_models.router, prefix="/ai/models", tags=["ai"])
 admin.include_router(ai_tasks.router, prefix="/ai/tasks", tags=["ai"])

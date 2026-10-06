@@ -136,3 +136,96 @@ export const PROMPT_BUILTIN_VARIABLES: Record<PromptKind, readonly string[]> = {
 
 /** 模板变量占位 `{{name}}`（允许 `{{ name }}`，docs/09 §5.3） */
 export const PROMPT_VARIABLE_PATTERN = /\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g;
+
+// ---------- 关键词 / 标题 / 内容 / 批次（docs/09 §6~§10） ----------
+import type { BatchStatus, ContentStatus } from "./enums";
+
+/** 批次终态（docs/09 §9.3）：轮询到这些状态后停止 */
+export const BATCH_TERMINAL_STATUSES: readonly BatchStatus[] = ["succeeded", "partial", "failed", "cancelled"];
+
+/** `POST …/batch-status` 的 `ids` 上限（docs/04 §9） */
+export const BATCH_IDS_MAX = 500;
+/** `POST /admin/keywords/import` 的 `items` 与 CSV 数据行上限（docs/09 §6.7） */
+export const KEYWORD_IMPORT_MAX = 5000;
+/** `POST /admin/keywords/import-file` 文件大小上限（字节） */
+export const KEYWORD_IMPORT_FILE_MAX_BYTES = 2 * 1024 * 1024;
+/** 关键词生成：种子词 1~20 个、每个 ≤ 60 字符；竞品 ≤ 10 个、每个 ≤ 60 字符；受众 ≤ 255（docs/09 §6.1） */
+export const KEYWORD_GENERATE_LIMITS = { seeds: 20, seedLength: 60, competitors: 10, competitorLength: 60, audience: 255 } as const;
+/** 关键词长度上限（清洗后，docs/09 §6.2、§6.7）与人工标签上限（docs/09 §6.8） */
+export const KEYWORD_LIMITS = { keyword: 120, tags: 20, tagLength: 30 } as const;
+/** 标题：生成一次最多 50 个关键词，标题 ≤ 200 字符，人工分 0~10 步长 0.5（docs/09 §7.2~§7.4） */
+export const TITLE_LIMITS = { keywordIds: 50, title: 200, manualScoreMax: 10, manualScoreStep: 0.5 } as const;
+/** 内容：一次最多 20 个标题；重写补充要求 ≤ 500；大纲 1~40 项、标题 ≤ 120、要点 ≤ 8 个且每个 ≤ 200；SEO 字段上限（docs/09 §8.1~§8.7） */
+export const CONTENT_LIMITS = {
+  titleIds: 20,
+  instruction: 500,
+  outlineItems: 40,
+  outlineHeading: 120,
+  outlinePoints: 8,
+  outlinePoint: 200,
+  summary: 500,
+  seoTitle: 200,
+  seoDescription: 500,
+  seoKeywords: 10,
+  seoKeyword: 60,
+  faqQuestion: 200,
+  faqAnswer: 1000,
+  /** SEO 面板提示阈值：seo_title 超过 60 字、seo_description 不在 80~160 字时黄色提示（服务端不校验） */
+  seoTitleSuggest: 60,
+  seoDescriptionMin: 80,
+  seoDescriptionMax: 160,
+  /** 质量分低于该值在列表标红 */
+  qualityWarn: 60,
+} as const;
+
+/** 内容编辑器动作（docs/09 §10.6）；`backfill` = 回填链接（docs/11） */
+export const CONTENT_ACTION = [
+  "save",
+  "generate_outline",
+  "generate_body",
+  "generate_seo",
+  "rewrite",
+  "submit_review",
+  "approve",
+  "reject",
+  "archive",
+  "unarchive",
+  "delete",
+  "backfill",
+] as const;
+export type ContentAction = (typeof CONTENT_ACTION)[number];
+
+/**
+ * 状态 → 允许动作（与后端 `content_service.transition` 及各生成入口的起始状态一致，docs/09 §8.1、§8.10、§10.6）。
+ * 附加条件由页面判断：`rewrite`/`generate_seo` 需正文非空；`delete` 需 `link_count=0`；`approve`/`reject` 需 `content.contents.review`。
+ */
+export const CONTENT_ACTIONS: Record<ContentStatus, readonly ContentAction[]> = {
+  draft: ["save", "generate_outline", "generate_body", "generate_seo", "rewrite", "archive", "delete"],
+  generating: [],
+  ready: ["save", "generate_outline", "generate_body", "generate_seo", "rewrite", "archive", "submit_review"],
+  reviewing: ["approve", "reject"],
+  approved: ["save", "generate_outline", "generate_seo", "rewrite", "archive", "backfill"],
+  rejected: ["save", "generate_outline", "generate_body", "generate_seo", "rewrite", "archive"],
+  published: ["save", "generate_outline", "generate_seo", "rewrite", "archive", "backfill"],
+  archived: ["unarchive", "delete"],
+};
+
+/** 质量规则风险标记（docs/09 §8.9） */
+export const CONTENT_RISK_FLAG = [
+  "too_short",
+  "too_long",
+  "missing_h2",
+  "too_many_h2",
+  "banned_word",
+  "duplicate_title",
+  "missing_seo_meta",
+  "missing_faq",
+  "truncated",
+] as const;
+export type ContentRiskFlag = (typeof CONTENT_RISK_FLAG)[number];
+
+/** 阻断提审的风险标记（docs/09 §8.9） */
+export const REVIEW_BLOCKING_FLAGS: readonly ContentRiskFlag[] = ["banned_word", "too_short"];
+
+/** 批次 `error_summary` 中的分项计数键（docs/09 §9.3）；其余键为失败根任务的 `error_category` 或 `stale_after_submit` */
+export const BATCH_APPLY_COUNT_KEYS = ["duplicates", "invalid", "intent_missing", "empty_output", "too_long"] as const;

@@ -273,6 +273,17 @@ def read_only(users: UserFactory) -> User:
 
 
 @pytest.fixture
+def system_templates(db: Session, super_admin: User) -> dict[str, Any]:
+    """seed 的系统 Prompt 模板（``seeds.seed.SYSTEM_PROMPT_TEMPLATES``，全局、已发布、zh-CN）：返回 ``{code: PromptTemplate}``。"""
+    from app.models import PromptTemplate
+    from seeds.seed import seed_system_prompt_templates
+
+    seed_system_prompt_templates(db, super_admin.admin)
+    rows = db.scalars(select(PromptTemplate).where(PromptTemplate.version == 1, PromptTemplate.is_system == True)).all()  # noqa: E712
+    return {row.code: row for row in rows}
+
+
+@pytest.fixture
 def custom_user(users: UserFactory) -> User:
     """自定义组「媒体设计」（own）：``dashboard.view`` + 图片生成（自动补齐依赖）。"""
     group = users.custom_group("媒体设计", ["dashboard.view", "media.images.generate"])

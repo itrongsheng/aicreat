@@ -117,8 +117,17 @@ def pending_after_commit(session: Session) -> int:
     return len(session.info.get(_AFTER_COMMIT_KEY) or [])
 
 
+def _savepoint_event(session: Session) -> bool:
+    """``after_commit`` / ``after_rollback`` 也会在 SAVEPOINT（``begin_nested``）释放 / 回滚时触发：此时根事务仍处于活动状态，
+    提交后回调既不能提前执行，也不能被丢弃（逐条导入的 SAVEPOINT 回滚不应丢掉同一事务内已登记的入队 / 计数）。"""
+    root = session.get_transaction()
+    return root is not None and root.is_active
+
+
 @event.listens_for(Session, "after_commit")
 def _run_after_commit(session: Session) -> None:
+    if _savepoint_event(session):
+        return
     callbacks = session.info.pop(_AFTER_COMMIT_KEY, None) or []
     for fn in callbacks:
         try:
@@ -129,4 +138,6 @@ def _run_after_commit(session: Session) -> None:
 
 @event.listens_for(Session, "after_rollback")
 def _discard_after_commit(session: Session) -> None:
+    if _savepoint_event(session):
+        return
     session.info.pop(_AFTER_COMMIT_KEY, None)
