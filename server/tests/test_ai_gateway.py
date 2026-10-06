@@ -1006,7 +1006,7 @@ def test_alert_handling_scope_and_summary(db: Session, project: Project, owner: 
     assert alert_service.batch_resolve(db, SYSTEM_SCOPE, [biz.id], admin_id=None)["skipped"] == [{"id": biz.id, "reason": "invalid_transition"}]
     assert alert_service.ignore(db, SYSTEM_SCOPE, sysa.id, admin_id=None)["status"] == "ignored"
     assert alert_service.summary(db, own)["today_resolved"] == 1
-    assert alert_service.evaluate(db)["placeholder"] is True
+    assert "placeholder" not in alert_service.evaluate(db, SYSTEM_SCOPE)
 
 
 # =====================================================================

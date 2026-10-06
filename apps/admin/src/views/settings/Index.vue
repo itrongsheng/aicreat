@@ -1,7 +1,9 @@
 <script setup lang="ts">
-// 系统配置（docs/04 §6.6、§7.18）：按配置键分 Tab。system_info 按语言分别维护表单；
-// ai_routing_config 默认使用专用表单 AiRoutingForm.vue（docs/08 §4.2，可切换为 JSON）；
-// 其它键以 JsonEditor 编辑，保存 PUT /admin/settings/{key}，后端校验错误逐项展示（后续阶段可替换为专用表单）。
+// 系统配置（docs/04 §6.6、§7.18；docs/11 §11.5）：按配置键分 Tab。system_info 按语言分别维护表单；
+// 专用表单（默认，可切换为 JSON）：ai_routing_config → AiRoutingForm.vue（docs/08 §4.2）、monitoring_config → MonitoringConfigForm.vue、
+// geo_engines → GeoEnginesForm.vue、seo_providers → SeoProvidersForm.vue、alert_config → AlertConfigForm.vue（docs/11 §13.1、§8.1、§7.6、§10.3）；
+// 其它键以 JsonEditor 编辑。保存 PUT /admin/settings/{key}，后端 400 校验错误按 loc 回显到表单字段（JSON 模式逐项列出）；
+// 监控相关四个键保存成功后提示「下一轮调度生效」，并清空引擎目录缓存（useIndexEngines）。
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useI18n } from "vue-i18n";
@@ -11,8 +13,14 @@ import { SUPPORTED_LOCALES, type Locale, type Setting, type SiteInfo, type Valid
 import { validationErrors } from "@/api/client";
 import * as settingsApi from "@/api/settings";
 import JsonEditor from "@/components/JsonEditor.vue";
+import { invalidateIndexEngines } from "@/composables/useIndexEngines";
 import { usePermission } from "@/composables/usePermission";
+import { useAuthStore } from "@/store/auth";
 import AiRoutingForm from "./AiRoutingForm.vue";
+import AlertConfigForm from "./AlertConfigForm.vue";
+import GeoEnginesForm from "./GeoEnginesForm.vue";
+import MonitoringConfigForm from "./MonitoringConfigForm.vue";
+import SeoProvidersForm from "./SeoProvidersForm.vue";
 
 type JsonKey = Exclude<settingsApi.SettingKey, "system_info">;
 type JsonValue = Record<string, unknown>;
@@ -27,11 +35,16 @@ const JSON_KEYS: JsonKey[] = [
   "ai_routing_config",
   "stats_config",
 ];
+/** 有专用表单的键（默认表单模式，可切换为 JSON） */
+const FORM_KEYS: JsonKey[] = ["monitoring_config", "geo_engines", "seo_providers", "alert_config", "ai_routing_config"];
+/** 监控相关键：保存后下一轮调度生效，且影响引擎目录（运行时子集） */
+const MONITORING_KEYS: JsonKey[] = ["monitoring_config", "geo_engines", "seo_providers", "alert_config"];
 /** 引用环境变量的字段：GET 时同级附加 configured: true|false，保存前剔除 */
 const ENV_FIELDS = ["credential_env", "site_url_env", "url_env"] as const;
 
 const { t } = useI18n();
 const { has } = usePermission();
+const auth = useAuthStore();
 const route = useRoute();
 const router = useRouter();
 
@@ -67,13 +80,32 @@ function setEditorRef(key: JsonKey, el: unknown) {
   else delete editors.value[key]; // 卸载（如 AI 路由切换到表单模式）时移除，避免校验已卸载的编辑器
 }
 
-/** ai_routing_config 的编辑方式：专用表单（默认）或 JSON */
-const aiRoutingMode = ref<"form" | "json">("form");
-const usesForm = (key: JsonKey) => key === "ai_routing_config" && aiRoutingMode.value === "form";
-// 表单只产出合法对象：从 JSON 模式（可能停在非法文本）切回表单时恢复可保存状态
-watch(aiRoutingMode, (mode) => {
-  if (mode === "form") states.ai_routing_config.valid = true;
+/** 专用表单键的编辑方式：专用表单（默认）或 JSON */
+const modes = reactive(Object.fromEntries(FORM_KEYS.map((k) => [k, "form"])) as Record<JsonKey, "form" | "json">);
+const hasForm = (key: JsonKey) => FORM_KEYS.includes(key);
+const usesForm = (key: JsonKey) => hasForm(key) && modes[key] === "form";
+
+function setMode(key: JsonKey, mode: "form" | "json") {
+  modes[key] = mode;
+  // 切换编辑方式时当前值必为合法对象：恢复可保存状态，由新编辑器 / 表单重新上报合法性
+  // （AiRoutingForm 只产出合法对象、不上报；其它表单挂载时立即上报前端即时校验结果）
+  states[key].valid = true;
+}
+
+/** GEO 引擎 code（监控表单的 index_check.geo_engines 候选项与一致性提示） */
+const geoEngineCodes = computed<string[]>(() => {
+  const list = states.geo_engines.value.engines;
+  return Array.isArray(list) ? list.filter((e): e is Record<string, unknown> => isPlainObject(e) && typeof e.code === "string").map((e) => e.code as string) : [];
 });
+
+function savedValue(key: JsonKey): JsonValue {
+  try {
+    const parsed = JSON.parse(states[key].original) as unknown;
+    return isPlainObject(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -150,14 +182,24 @@ async function reloadKey(key: JsonKey) {
 
 async function saveKey(key: JsonKey) {
   const state = states[key];
-  if (usesForm(key)) state.valid = true;
-  else if (!editors.value[key]?.validate() || !state.valid) return;
+  if (usesForm(key)) {
+    if (key === "ai_routing_config") state.valid = true;
+    else if (!state.valid) {
+      ElMessage.warning(t("settings.fixErrorsFirst"));
+      return;
+    }
+  } else if (!editors.value[key]?.validate() || !state.valid) return;
   state.saving = true;
   state.errors = [];
   try {
     const saved = await settingsApi.saveSetting<JsonValue>(key, stripConfigured(state.value) as JsonValue, "*", { silent: true });
     applyValue(key, saved.value);
-    ElMessage.success(t("common.saved"));
+    if (MONITORING_KEYS.includes(key)) {
+      invalidateIndexEngines();
+      ElMessage.success(t("settings.savedNextRound"));
+    } else {
+      ElMessage.success(t("common.saved"));
+    }
   } catch (err) {
     const items = validationErrors(err);
     state.errors = items;
@@ -284,8 +326,9 @@ onMounted(loadAll);
       <el-tab-pane v-for="key in JSON_KEYS" :key="key" :name="key" :label="t(`settings.tabs.${key}`)" lazy>
         <div class="settings-pane">
           <el-alert v-if="key === 'ai_routing_config'" type="info" :closable="false" show-icon :title="t('settings.aiRoutingHint')" class="settings-alert" />
-          <div v-if="key === 'ai_routing_config'" class="settings-mode">
-            <el-radio-group v-model="aiRoutingMode" size="small">
+          <el-alert v-if="MONITORING_KEYS.includes(key)" type="info" :closable="false" show-icon :title="t('settings.monitoringHint')" class="settings-alert" />
+          <div v-if="hasForm(key)" class="settings-mode">
+            <el-radio-group :model-value="modes[key]" size="small" @update:model-value="(v: string | number | boolean | undefined) => setMode(key, v === 'json' ? 'json' : 'form')">
               <el-radio-button value="form">{{ t("aiRouting.formMode") }}</el-radio-button>
               <el-radio-button value="json">{{ t("aiRouting.jsonMode") }}</el-radio-button>
             </el-radio-group>
@@ -295,7 +338,7 @@ onMounted(loadAll);
             <template v-if="!usesForm(key)"> · {{ t("settings.jsonHint") }}</template>
           </p>
 
-          <div v-if="envEntries[key].length" class="settings-env">
+          <div v-if="envEntries[key].length && !usesForm(key)" class="settings-env">
             <div class="settings-env-title">{{ t("settings.envStatus") }}</div>
             <div class="settings-env-hint">{{ t("settings.envHint") }}</div>
             <el-table :data="envEntries[key]" size="small" border class="settings-env-table">
@@ -318,7 +361,39 @@ onMounted(loadAll);
             </el-table>
           </div>
 
-          <AiRoutingForm v-if="usesForm(key)" v-model="states[key].value" :readonly="!canUpdate" :errors="states[key].errors" />
+          <AiRoutingForm v-if="usesForm(key) && key === 'ai_routing_config'" v-model="states[key].value" :readonly="!canUpdate" :errors="states[key].errors" />
+          <MonitoringConfigForm
+            v-else-if="usesForm(key) && key === 'monitoring_config'"
+            v-model="states[key].value"
+            :readonly="!canUpdate"
+            :errors="states[key].errors"
+            :geo-engine-codes="geoEngineCodes"
+            @validity="(v: boolean) => (states[key].valid = v)"
+          />
+          <GeoEnginesForm
+            v-else-if="usesForm(key) && key === 'geo_engines'"
+            v-model="states[key].value"
+            :readonly="!canUpdate"
+            :errors="states[key].errors"
+            :zhiqi-mode="auth.zhiqiMode"
+            :saved="savedValue(key)"
+            @validity="(v: boolean) => (states[key].valid = v)"
+          />
+          <SeoProvidersForm
+            v-else-if="usesForm(key) && key === 'seo_providers'"
+            v-model="states[key].value"
+            :readonly="!canUpdate"
+            :errors="states[key].errors"
+            :zhiqi-mode="auth.zhiqiMode"
+            @validity="(v: boolean) => (states[key].valid = v)"
+          />
+          <AlertConfigForm
+            v-else-if="usesForm(key) && key === 'alert_config'"
+            v-model="states[key].value"
+            :readonly="!canUpdate"
+            :errors="states[key].errors"
+            @validity="(v: boolean) => (states[key].valid = v)"
+          />
           <JsonEditor
             v-else
             :ref="(el: unknown) => setEditorRef(key, el)"

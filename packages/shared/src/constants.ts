@@ -229,3 +229,52 @@ export const REVIEW_BLOCKING_FLAGS: readonly ContentRiskFlag[] = ["banned_word",
 
 /** 批次 `error_summary` 中的分项计数键（docs/09 §9.3）；其余键为失败根任务的 `error_category` 或 `stale_after_submit` */
 export const BATCH_APPLY_COUNT_KEYS = ["duplicates", "invalid", "intent_missing", "empty_output", "too_long"] as const;
+
+// ---------- 回填链接与发布平台（docs/11 §4.1、§5.2、§5.3） ----------
+
+/** 回填校验（与后端 `link_service.backfill` 一致，前端预检用） */
+export const LINK_LIMITS = {
+  /** `POST /admin/links/batch` 的 `items` 上限 */
+  batchMax: 100,
+  publishAccount: 100,
+  note: 500,
+  /** `published_at` 不得晚于当前时间 + 5 分钟 */
+  publishedAtFutureMinutes: 5,
+  /** `published_at` 不得早于当前时间 − 3650 天 */
+  publishedAtPastDays: 3650,
+  /** `index_check.overdue_days` 默认值：列表 / 详情「超期未收录」标记 */
+  overdueDays: 30,
+} as const;
+
+/** 平台规则校验（docs/11 §5.2、§5.3） */
+export const PLATFORM_LIMITS = {
+  code: 32,
+  name: 50,
+  nameEn: 80,
+  icon: 500,
+  homeUrl: 255,
+  markerMin: 4,
+  markerMax: 100,
+  markersMax: 50,
+  userAgentMax: 200,
+  /** 覆盖 UA 必须包含的子串 */
+  userAgentMarker: "aicreat",
+  /** `url_patterns` / `redirect_markers` 各 ≤ 50 条、单条 ≤ 500 字符 */
+  patternsMax: 50,
+  patternMax: 500,
+  /** `fetch_config.headers` ≤ 20 个，值 ≤ 500 字符且不含换行 */
+  headersMax: 20,
+  headerValueMax: 500,
+  /** `fetch_config.timeout_seconds` 取值范围（秒） */
+  timeoutMin: 1,
+  timeoutMax: 60,
+} as const;
+
+/** `fetch_config` 可覆盖的键（`max_response_bytes` / `max_redirects` 只能全局调整） */
+export const PLATFORM_FETCH_CONFIG_KEYS = ["user_agent", "headers", "timeout_seconds", "respect_robots", "allow_http"] as const;
+
+/** `fetch_config.headers` 禁止的请求头（忽略大小写） */
+export const PLATFORM_FORBIDDEN_HEADERS = ["cookie", "authorization", "proxy-authorization"] as const;
+
+/** `fetch_config.headers` 允许的请求头（忽略大小写），另允许 `X-*` */
+export const PLATFORM_ALLOWED_HEADERS = ["accept-language", "referer"] as const;

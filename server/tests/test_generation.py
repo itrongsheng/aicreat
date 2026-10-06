@@ -756,8 +756,14 @@ def test_resolve_template_fallback_chain(client: TestClient, db: Session, super_
     with pytest.raises(BusinessError) as exc:
         pts.resolve_template(db, "keyword", pid, "zh-CN")
     assert (exc.value.code, exc.value.http_status, exc.value.data) == (404, 404, {"kind": "keyword"})
+    # 收录检测 kind 的缺省 code 固定为 sys_geo_query（已 seed）；归档后同样 404 data.kind
+    assert pts.resolve_template(db, "geo_query", pid).code == "sys_geo_query"
+    geo_rows = db.scalars(select(PromptTemplate).where(PromptTemplate.code == "sys_geo_query")).all()
+    for row in geo_rows:
+        row.status = "archived"
+    db.commit()
     with pytest.raises(BusinessError) as exc:
-        pts.resolve_template(db, "geo_query", pid)                    # sys_geo_query 第 5 步才 seed
+        pts.resolve_template(db, "geo_query", pid)
     assert exc.value.data == {"kind": "geo_query"}
 
 
@@ -870,7 +876,7 @@ def test_seed_system_templates_idempotent(db: Session, super_admin: User, system
     )
 
     codes = {"sys_keyword", "sys_title", "sys_outline", "sys_content", "sys_section", "sys_rewrite", "sys_expand", "sys_shorten",
-             "sys_restyle", "sys_seo_meta", "sys_faq", "sys_image_prompt"}
+             "sys_restyle", "sys_seo_meta", "sys_faq", "sys_image_prompt", "sys_seo_query", "sys_geo_query"}
     assert set(system_templates) == codes
     for code, row in system_templates.items():
         assert (row.project_id, row.is_system, row.status, row.language, row.version) == (0, True, "published", "zh-CN", 1), code
@@ -886,7 +892,7 @@ def test_seed_system_templates_idempotent(db: Session, super_admin: User, system
     context = run_seed(db)
     assert context["prompt_templates"] == {"created": 0, "updated": 0}
     assert db.scalar(select(PromptTemplate.id).where(PromptTemplate.version > 1)) is None
-    assert len(SYSTEM_PROMPT_TEMPLATES) == 12
+    assert len(SYSTEM_PROMPT_TEMPLATES) == 14
 
     # 运营发布了新版本后再 seed：v1 保持归档、不出现两个 published
     v2 = PromptTemplate(**{c: getattr(system_templates["sys_faq"], c) for c in (

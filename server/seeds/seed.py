@@ -5,12 +5,14 @@
 - 默认超级管理员 ``SEED_ADMIN_USERNAME`` / ``SEED_ADMIN_PASSWORD``（组 ``super_admin``、``created_by=NULL``、``token_version=1``）；
   账号已存在时**不覆盖**密码、不改组、不改状态；
 - 示例项目（``owner_id`` = 默认超管）；已存在时不改负责人；
-- 系统 Prompt 模板（``SYSTEM_PROMPT_TEMPLATES``，docs/09 §5.7；``sys_geo_query`` / ``sys_seo_query`` 由第 5 步追加）；
-- 默认发布平台（第 8 步）由后续阶段在 ``SEED_STEPS`` 中追加各自的 ``seed_*`` 函数。
+- 系统 Prompt 模板（``SYSTEM_PROMPT_TEMPLATES``，docs/09 §5.7；``sys_geo_query`` / ``sys_seo_query`` 见 docs/11 §7.3、§8.3）；
+- 默认发布平台（``DEFAULT_PLATFORMS``，docs/11 §5.2，8 个，``is_system=1``）：不存在则创建；已存在时只确保 ``is_system=1``，
+  不覆盖后台维护过的规则（markers 为示例初值，以实际平台页面为准，后台可维护）。
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import sys
 from collections.abc import Callable
@@ -27,8 +29,8 @@ from app.core.admin_permissions import SUPER_ADMIN_GROUP_CODE  # noqa: E402
 from app.core.config import settings  # noqa: E402
 from app.core.database import SessionLocal  # noqa: E402
 from app.core.security import hash_password  # noqa: E402
-from app.models import Admin, AdminGroup, Project  # noqa: E402
-from app.services import prompt_template_service  # noqa: E402
+from app.models import Admin, AdminGroup, Project, PublishPlatform  # noqa: E402
+from app.services import platform_service, prompt_template_service  # noqa: E402
 from app.services.admin_rbac_service import ensure_rbac_seed  # noqa: E402
 
 logger = logging.getLogger("seeds")
@@ -137,6 +139,9 @@ VARIABLE_LABELS: dict[str, str] = {
     "body": "正文",
     "summary": "摘要",
     "usage_type": "配图用途",
+    "url": "链接",
+    "domain": "域名",
+    "engine_name": "引擎名称",
 }
 
 
@@ -169,7 +174,7 @@ _REWRITE_TASKS: dict[str, tuple[str, str]] = {
 }
 _REWRITE_VARS = ("text", "title", "keyword", "instruction", "style", "format", "target_word_count")
 
-# 种类 → 规格；phase 5 追加 sys_geo_query / sys_seo_query
+# 种类 → 规格（含收录检测的 sys_seo_query / sys_geo_query，docs/11 §7.3、§8.3）
 SYSTEM_PROMPT_TEMPLATES: list[dict[str, Any]] = [
     {
         "code": "sys_keyword",
@@ -394,6 +399,44 @@ SYSTEM_PROMPT_TEMPLATES: list[dict[str, Any]] = [
         "output_schema": None,
         "model_params": {"temperature": 0.7, "max_tokens": 512},
     },
+    # docs/11 §7.3：SEO 收录核查（zhiqi_web_search；可被项目 default_templates_json["seo_query"] 覆盖）
+    {
+        "code": "sys_seo_query",
+        "kind": "seo_query",
+        "name": "系统 · SEO 收录核查",
+        "description": "经联网检索核查页面是否已被指定搜索引擎收录，输出 JSON {indexed, evidence[]}（docs/11 §7.3）",
+        "system_prompt": _system(
+            "你是搜索引擎收录核查助手。只能依据联网检索到的真实结果作答，不得编造；检索不到时如实回答未收录。只输出 JSON，不要输出其它文字。"
+        ),
+        "user_prompt": (
+            "请在 {{engine_name}} 中核查以下页面是否已被收录：\n"
+            "URL：{{url}}\n"
+            "标题：{{title}}\n"
+            "域名：{{domain}}\n"
+            "分别用 URL 与标题各检索一次；标题为空时只按 URL 检索，URL 为空时只按标题检索。若检索结果中出现该 URL，或同域名下出现该标题的页面，"
+            "视为已收录，并把命中的结果放入 evidence。\n"
+            '输出：{"indexed": true 或 false, "evidence": [{"url": "", "title": "", "snippet": ""}]}'
+        ),
+        "variables": _vars("url", "title", "domain", "engine_name"),
+        "output_format": "json",
+        "output_schema": None,
+        "model_params": None,
+    },
+    # docs/11 §8.3：GEO 引用提问（默认不把 url / domain 写入提问正文，避免模型直接访问该链接造成假阳性）
+    {
+        "code": "sys_geo_query",
+        "kind": "geo_query",
+        "name": "系统 · GEO 引用提问",
+        "description": "以普通用户身份向生成式引擎提问并要求列出来源链接，用于判定链接是否被引用（docs/11 §8.3）",
+        "system_prompt": _system(
+            "你是一名普通用户，正在向 AI 助手提问。请基于联网检索回答，并在回答中以 Markdown 链接形式给出你引用的来源。"
+        ),
+        "user_prompt": "关于「{{keyword}}」，有哪些值得参考的文章或资料？请重点介绍与「{{title}}」相关的内容，并列出来源链接。",
+        "variables": _vars("keyword", "title", "url", "domain"),
+        "output_format": "text",
+        "output_schema": None,
+        "model_params": None,
+    },
 ]
 
 
@@ -410,10 +453,95 @@ def _seed_system_prompt_templates(db: Session, context: dict[str, Any]) -> None:
     context["prompt_templates"] = seed_system_prompt_templates(db, admin)
 
 
-# 依次执行的 seed 步骤 (名称, 函数(db, context))；后续阶段追加系统 Prompt 模板与默认发布平台
+# =====================================================================
+# 默认发布平台（docs/11 §5.2；docs/03 B.19）
+# =====================================================================
+
+# markers 为示例初值，以实际平台页面为准，后台可维护；fetch_config 为空对象 = 全部取 monitoring_config.link_check 默认值
+DEFAULT_PLATFORMS: list[dict[str, Any]] = [
+    {
+        "code": "zhihu", "name": "知乎", "name_en": "Zhihu", "home_url": "https://www.zhihu.com/", "sort": 10,
+        "url_patterns": [r"^https?://(www\.|zhuanlan\.)?zhihu\.com/"],
+        "deleted_markers": ["你似乎来到了没有知识存在的荒原", "内容已被删除", "该内容已被作者删除", "违反社区规范"],
+        "redirect_markers": [r"^https?://www\.zhihu\.com/signin", r"^https?://www\.zhihu\.com/?$"],
+    },
+    {
+        "code": "wechat_mp", "name": "微信公众号", "name_en": "WeChat Official Account", "home_url": "https://mp.weixin.qq.com/", "sort": 20,
+        "url_patterns": [r"^https?://mp\.weixin\.qq\.com/"],
+        "deleted_markers": ["该内容已被发布者删除", "此内容因违规无法查看", "此内容发送失败无法查看", "参数错误"],
+        "redirect_markers": [],
+    },
+    {
+        "code": "xiaohongshu", "name": "小红书", "name_en": "Xiaohongshu", "home_url": "https://www.xiaohongshu.com/", "sort": 30,
+        "url_patterns": [r"^https?://(www\.)?xiaohongshu\.com/", r"^https?://xhslink\.com/"],
+        "deleted_markers": ["当前笔记暂时无法浏览", "笔记不存在", "你访问的页面不见了", "该笔记已被删除"],
+        "redirect_markers": [r"^https?://www\.xiaohongshu\.com/?$", r"^https?://www\.xiaohongshu\.com/404"],
+    },
+    {
+        "code": "csdn", "name": "CSDN", "name_en": "CSDN", "home_url": "https://www.csdn.net/", "sort": 40,
+        "url_patterns": [r"^https?://(blog\.|www\.)?csdn\.net/"],
+        "deleted_markers": ["您访问的页面不存在", "文章已被删除", "该文章已被作者删除"],
+        "redirect_markers": [r"^https?://www\.csdn\.net/?$", r"^https?://passport\.csdn\.net/"],
+    },
+    {
+        "code": "toutiao", "name": "今日头条", "name_en": "Toutiao", "home_url": "https://www.toutiao.com/", "sort": 50,
+        "url_patterns": [r"^https?://(www\.|m\.)?toutiao\.com/"],
+        "deleted_markers": ["内容已删除", "该内容已下线", "文章不存在", "暂无内容"],
+        "redirect_markers": [r"^https?://www\.toutiao\.com/?$", r"^https?://sso\.toutiao\.com/"],
+    },
+    {
+        "code": "baijiahao", "name": "百家号", "name_en": "Baijiahao", "home_url": "https://baijiahao.baidu.com/", "sort": 60,
+        "url_patterns": [r"^https?://baijiahao\.baidu\.com/"],
+        "deleted_markers": ["该内容已被删除", "此内容已被作者删除", "内容不存在", "很抱歉，您访问的页面不存在"],
+        "redirect_markers": [r"^https?://baijiahao\.baidu\.com/?$", r"^https?://www\.baidu\.com/?$"],
+    },
+    {
+        "code": "website", "name": "企业官网/自有站点", "name_en": "Website", "home_url": None, "sort": 70,
+        "url_patterns": [],
+        "deleted_markers": ["页面不存在", "文章不存在", "文章已删除", "404 Not Found"],
+        "redirect_markers": [],
+    },
+    {
+        "code": "other", "name": "其他", "name_en": "Other", "home_url": None, "sort": 80,
+        "url_patterns": [],
+        "deleted_markers": ["内容不存在", "该内容已被删除", "页面不存在"],
+        "redirect_markers": [],
+    },
+]
+
+
+def seed_publish_platforms(db: Session) -> dict[str, int]:
+    """默认 8 个平台幂等 upsert（``is_system=1``）：不存在则创建；已存在只确保 ``is_system=1``，不覆盖后台维护的规则。"""
+    created = updated = 0
+    for spec in DEFAULT_PLATFORMS:
+        platform = db.scalar(select(PublishPlatform).where(PublishPlatform.code == spec["code"]).limit(1))
+        if platform is None:
+            db.add(PublishPlatform(
+                code=spec["code"], name=spec["name"], name_en=spec["name_en"], icon=None, home_url=spec["home_url"],
+                url_patterns_json=json.dumps(spec["url_patterns"], ensure_ascii=False),
+                deleted_markers_json=json.dumps(spec["deleted_markers"], ensure_ascii=False),
+                redirect_markers_json=json.dumps(spec["redirect_markers"], ensure_ascii=False),
+                fetch_config_json="{}", is_system=True, is_active=True, sort=spec["sort"],
+            ))
+            created += 1
+        elif not platform.is_system:
+            platform.is_system = True
+            updated += 1
+    db.commit()
+    platform_service.invalidate_cache()
+    logger.info("默认发布平台：新建 %s，更新 %s", created, updated)
+    return {"created": created, "updated": updated}
+
+
+def _seed_publish_platforms(db: Session, context: dict[str, Any]) -> None:
+    context["publish_platforms"] = seed_publish_platforms(db)
+
+
+# 依次执行的 seed 步骤 (名称, 函数(db, context))
 SEED_STEPS: list[tuple[str, Callable[[Session, dict[str, Any]], None]]] = [
     ("admin_and_example_project", _seed_admin_and_project),
     ("system_prompt_templates", _seed_system_prompt_templates),
+    ("publish_platforms", _seed_publish_platforms),
 ]
 
 

@@ -3,7 +3,7 @@
 // 远程按标题搜索（防抖 300ms），已选值不在当前选项中时按 ID 取一次详情补齐标签；切换项目时清空选项。
 import { computed, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import type { Content } from "@aicreat/shared";
+import type { Content, ContentStatus } from "@aicreat/shared";
 import * as contentsApi from "@/api/contents";
 import StatusTag from "@/components/StatusTag.vue";
 
@@ -17,8 +17,10 @@ const props = withDefaults(
     disabled?: boolean;
     width?: string;
     size?: "large" | "default" | "small";
+    /** 只允许选择这些状态的内容（其余选项置灰），如回填链接只允许 approved / published */
+    allowedStatuses?: ContentStatus[] | null;
   }>(),
-  { projectId: null, placeholder: "", clearable: true, disabled: false, width: "100%", size: "default" },
+  { projectId: null, placeholder: "", clearable: true, disabled: false, width: "100%", size: "default", allowedStatuses: null },
 );
 
 const emit = defineEmits<{
@@ -125,7 +127,13 @@ defineExpose({ selected });
     :style="{ width }"
     @visible-change="(open: boolean) => open && !options.length && search()"
   >
-    <el-option v-for="c in merged" :key="c.id" :value="c.id" :label="`#${c.id} ${c.title}`">
+    <el-option
+      v-for="c in merged"
+      :key="c.id"
+      :value="c.id"
+      :label="`#${c.id} ${c.title}`"
+      :disabled="!!allowedStatuses && !allowedStatuses.includes(c.status)"
+    >
       <div class="content-option">
         <span class="content-option__title">#{{ c.id }} {{ c.title }}</span>
         <StatusTag kind="content_status" :value="c.status" />

@@ -86,6 +86,7 @@ __all__ = [
     "render",
     "referenced_variables",
     "resolve_template",
+    "resolve_template_for_code",
     "sanitize_value",
     "response_format_for",
     "template_for_generation",
@@ -624,6 +625,26 @@ def resolve_template(db: Session, kind: str, project_id: int | None, language: s
         if found is not None:
             return found
     raise _not_found(MSG_NO_TEMPLATE, {"kind": kind})
+
+
+def resolve_template_for_code(
+    db: Session, kind: str, project_id: int | None, language: str | None = None, code: str | None = None
+) -> PromptTemplate:
+    """收录检测模板解析（docs/11 §7.3、§8.1、§8.2）：项目 ``default_templates_json[kind]`` 覆盖优先（同 ``resolve_template``
+    第 ① 步）；否则取配置的 ``code``（``geo_engines.engines[].prompt_template_code`` /
+    ``seo_providers.providers.zhiqi_web_search.prompt_template_code``，须为全局 ``published`` 模板，同语言优先、回退 ``zh-CN``）；
+    ``code`` 为空或该 code 已无 ``published`` 版本时回退 ``resolve_template``（缺省 code 的全局版本）。"""
+    if kind not in KIND_CAPABILITY:
+        raise ValueError(f"未知 prompt_kind: {kind}")
+    project = db.get(Project, project_id) if project_id else None
+    if project is not None and project_default_templates(project).get(kind):
+        return resolve_template(db, kind, project_id, language)
+    language = language or (project.language if project is not None else None) or FALLBACK_LANGUAGE
+    if code:
+        found = _published_of_code(db, code, kind=kind, project_ids=(0,), language=language)
+        if found is not None:
+            return found
+    return resolve_template(db, kind, project_id, language)
 
 
 def _template_ref_error(tpl: PromptTemplate, kind: str, project_id: int | None, loc: Sequence[str | int], input_value: Any) -> dict[str, Any] | None:

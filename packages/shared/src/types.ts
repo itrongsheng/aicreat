@@ -1232,10 +1232,25 @@ export interface PublishLink {
   note: string | null;
   created_at: string;
   updated_at: string;
-  /** 详情附带 */
-  platform?: { id: number; code: string; name: string; name_en?: string } | null;
-  content?: { id: number; title: string; status: ContentStatus; project_id?: number } | null;
+  /** 「超期未收录」标记（`index_check.overdue_days`，只用于列表 / 详情展示） */
+  index_overdue?: boolean;
+  /** 详情（及 `GET /admin/contents/{id}/links`）附带的平台摘要 */
+  platform?: { id: number; code: string; name: string; name_en?: string; icon?: string | null } | null;
+  /** 详情附带：内容摘要（内容对调用者不可见时为 null） */
+  content?: {
+    id: number;
+    title: string;
+    status: ContentStatus;
+    project_id?: number;
+    link_count?: number;
+    first_published_at?: string | null;
+  } | null;
   last_check?: LinkCheck | null;
+  /** 详情附带：当前配置的收录引擎与提供器（`seo_providers.engines` / `geo_engines.engines[]`，GEO 提供器固定 `zhiqi_model`） */
+  engines?: {
+    seo: { engine: string; provider: SeoProvider; enabled: boolean }[];
+    geo: { engine: string; name: string | null; provider: "zhiqi_model"; enabled: boolean }[];
+  };
 }
 
 /** `POST /admin/links` */
@@ -1244,12 +1259,80 @@ export interface LinkCreateResult {
   queued: boolean;
 }
 
+/** `POST /admin/links/batch` 的逐条结果；`reason` 仅在已存在链接对调用者不可见时出现（`owned_by_other`，`link_id=null`） */
+export interface LinkBatchResultItem {
+  index: number;
+  ok: boolean;
+  link_id: number | null;
+  queued: boolean;
+  code: number;
+  message: string;
+  reason?: "owned_by_other";
+}
+
 /** `POST /admin/links/batch` */
 export interface LinkBatchResult {
   created: number;
   failed: number;
-  results: { index: number; ok: boolean; link_id: number | null; queued: boolean; code: number; message: string }[];
+  results: LinkBatchResultItem[];
 }
+
+/** `POST /admin/links` 与 `POST /admin/links/batch` 的 `items[]`（04 §6.17、§7.10） */
+export interface LinkCreateBody {
+  content_id: number;
+  platform_id?: number | null;
+  url: string;
+  publish_account?: string | null;
+  /** ISO 8601 UTC；缺省取当前时间 */
+  published_at?: string | null;
+  note?: string | null;
+}
+
+/** `PUT /admin/links/{id}`：URL 不可改 */
+export interface LinkUpdateBody {
+  platform_id?: number;
+  publish_account?: string | null;
+  published_at?: string;
+  note?: string | null;
+}
+
+/** `POST /admin/links/{id}/check`、`/rebaseline`、`/index-check` 的返回 */
+export interface LinkQueuedResult {
+  queued: boolean;
+  reason?: "already_queued" | "daily_limit";
+}
+
+/** `POST /admin/links/{id}/index-check`：`engines` 省略时取 `kinds` 下全部启用引擎 */
+export interface LinkIndexCheckBody {
+  kinds: IndexKind[];
+  engines?: string[];
+}
+
+/** `POST /admin/links/{id}/mark-index`：`kind=seo` 只能 `indexed`/`not_indexed`，`kind=geo` 只能 `cited`/`not_cited` */
+export interface LinkMarkIndexBody {
+  kind: IndexKind;
+  engine: string;
+  status: "indexed" | "not_indexed" | "cited" | "not_cited";
+  note?: string | null;
+  evidence_url?: string | null;
+}
+
+/** `POST /admin/platforms`（`PUT` 时 `code` 不可改，其余字段可选） */
+export interface PlatformCreateBody {
+  code: string;
+  name: string;
+  name_en: string;
+  icon?: string | null;
+  home_url?: string | null;
+  url_patterns: string[];
+  deleted_markers: string[];
+  redirect_markers: string[];
+  fetch_config: PlatformFetchConfig;
+  is_active: boolean;
+  sort: number;
+}
+
+export type PlatformUpdateBody = Partial<Omit<PlatformCreateBody, "code">>;
 
 export interface LinkCheck {
   id: number;
@@ -1365,6 +1448,26 @@ export interface AlertSummary {
   acknowledged: SeverityCounts;
   today_opened: number;
   today_resolved: number;
+}
+
+/** `POST /admin/alerts/batch-resolve` */
+export interface AlertBatchResolveBody {
+  ids: number[];
+  note?: string | null;
+}
+
+/** `POST /admin/monitoring/link-checks/run`（用户视角下由 client.ts 附加查询参数 `owner_id`） */
+export interface MonitoringLinkChecksRunBody {
+  project_id?: number | null;
+  platform_id?: number | null;
+  link_ids?: number[] | null;
+  only_due: boolean;
+}
+
+/** `POST /admin/monitoring/index-checks/run`：`engines` 省略时取 `kinds` 下全部启用引擎 */
+export interface MonitoringIndexChecksRunBody extends MonitoringLinkChecksRunBody {
+  kinds: IndexKind[];
+  engines?: string[] | null;
 }
 
 // =====================================================================

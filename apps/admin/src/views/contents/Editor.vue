@@ -6,7 +6,7 @@
 //   SEO 要素（含 include_faq）、重写（模式受 rewrite.modes 限制、范围全文 / 指定小节（按 outline 顺序）、改风格、补充要求、模板、模型）、
 //   提审 / 通过 / 驳回（审核意见）、归档 / 恢复、导出 md / html / json、版本抽屉、删除；可用动作由 CONTENT_ACTIONS（状态 → 动作）决定；
 // - 面板：任务（TaskProgress）、大纲（OutlineEditor，增删改排后随保存提交）、SEO（字数提示、关键词 Tag、FAQ）、素材（插入到光标 / 设为封面 / 解绑，
-//   AssetPicker 选择已有素材绑定为配图 / 封面、上移 / 下移、「生成配图 / 生成封面」跳转图片工作台并预选本内容，docs/10 §7.5）、链接（GET /contents/{id}/links）、信息；
+//   AssetPicker 选择已有素材绑定为配图 / 封面、上移 / 下移、「生成配图 / 生成封面」跳转图片工作台并预选本内容，docs/10 §7.5）、链接（GET /contents/{id}/links，平台 / 存活 / 收录徽标，LinkBackfillDialog 预填本内容回填，docs/11 §11.8）、信息；
 // - 模板下拉仅 has('content.prompt_templates.view')、模型下拉仅 has('ai.models.view') 时显示，否则请求不带 template_id / model（§10.8）；
 // - 路由 /contents/new：打开手工创建对话框，创建后进入该内容的编辑器。
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
@@ -41,6 +41,8 @@ import AssetPicker from "@/components/AssetPicker.vue";
 import ContentCreateDialog from "@/components/ContentCreateDialog.vue";
 import ContentVersionsDrawer from "@/components/ContentVersionsDrawer.vue";
 import FaqEditor from "@/components/FaqEditor.vue";
+import LinkBackfillDialog from "@/components/LinkBackfillDialog.vue";
+import LinkIndexBadges from "@/components/LinkIndexBadges.vue";
 import GenerateNotice from "@/components/GenerateNotice.vue";
 import MarkdownEditor from "@/components/MarkdownEditor.vue";
 import MarkdownPreview from "@/components/MarkdownPreview.vue";
@@ -58,6 +60,7 @@ import { useRuntimeSettings } from "@/composables/useRuntimeSettings";
 import { useProjectStore } from "@/store/project";
 import { downloadBlob } from "@/utils/download";
 import { formatDateTime, formatNumber } from "@/utils/format";
+import { platformLabel } from "@/utils/links";
 import { countWords } from "@/utils/markdown";
 
 const { t, te } = useI18n();
@@ -832,11 +835,18 @@ async function loadLinks() {
   }
 }
 
-function gotoBackfill() {
-  const c = content.value;
-  if (!c) return;
-  // 回填链接（LinkBackfillDialog）由阶段 5 的 links/Index.vue 提供：按 content_id 预填并打开回填弹窗
-  void router.push({ path: "/links", query: { content_id: String(c.id), backfill: "1" } });
+// 回填链接弹窗（LinkBackfillDialog，content_id 预填并锁定，docs/11 §11.8）
+const backfillVisible = ref(false);
+
+function openBackfill() {
+  if (!content.value) return;
+  backfillVisible.value = true;
+}
+
+/** 回填成功：刷新链接列表与内容（link_count 变化使 approved → published） */
+function onBackfilled() {
+  void loadLinks();
+  void reload(false);
 }
 
 // ---------- 视图 ----------
@@ -1241,15 +1251,23 @@ onBeforeUnmount(() => {
                 <div v-for="l in links" :key="l.id" class="link-item">
                   <a :href="l.url" target="_blank" rel="noopener noreferrer nofollow" class="link-item__url">{{ l.url }}</a>
                   <div class="link-item__meta">
-                    <span>{{ l.platform?.name || `#${l.platform_id}` }}</span>
+                    <span>{{ platformLabel(l.platform ?? null, l.platform_id) }}</span>
                     <StatusTag kind="link_alive_status" :value="l.alive_status" />
                     <span class="text-secondary">{{ formatDateTime(l.published_at, false) }}</span>
                     <router-link v-if="has('publish.links.view')" :to="`/links/${l.id}`">{{ t("editor.links.detail") }}</router-link>
                   </div>
+                  <div class="link-item__index">
+                    <span class="text-secondary">SEO</span>
+                    <LinkIndexBadges :link="l" kind="seo" />
+                    <span class="text-secondary">GEO</span>
+                    <LinkIndexBadges :link="l" kind="geo" />
+                  </div>
                 </div>
                 <span v-if="!linksLoading && !links.length" class="text-secondary">{{ t("editor.links.empty") }}</span>
-                <!-- 回填链接弹窗（LinkBackfillDialog.vue）由阶段 5 提供；此处跳转链接页并按 content_id 打开回填 -->
-                <el-button v-if="allowed('backfill') && has('publish.links.create')" size="small" type="primary" plain @click="gotoBackfill">
+                <div v-if="links.length && has('publish.links.view')" class="link-panel-more">
+                  <router-link :to="{ path: '/links', query: { content_id: String(content.id) } }">{{ t("editor.links.viewAll") }}</router-link>
+                </div>
+                <el-button v-if="allowed('backfill') && has('publish.links.create')" size="small" type="primary" plain @click="openBackfill">
                   {{ t("editor.links.backfill") }}
                 </el-button>
                 <span v-else-if="has('publish.links.create')" class="text-secondary hint">{{ t("editor.links.backfillHint") }}</span>
@@ -1411,6 +1429,14 @@ onBeforeUnmount(() => {
         :locked="locked"
         :dirty="dirty"
         @restored="onVersionRestored"
+      />
+
+      <LinkBackfillDialog
+        v-model="backfillVisible"
+        :content-id="content.id"
+        :content-title="content.title"
+        :project-id="content.project_id"
+        @created="onBackfilled"
       />
     </template>
   </div>
@@ -1633,6 +1659,18 @@ onBeforeUnmount(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--el-color-primary);
+}
+.link-item__index {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  margin-top: 4px;
+  font-size: 12px;
+}
+.link-panel-more {
+  margin: 6px 0;
+  font-size: 12px;
 }
 .link-item__meta {
   display: flex;
