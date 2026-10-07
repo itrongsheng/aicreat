@@ -8,6 +8,7 @@ import type {
   AiTaskOperation,
   AiTaskRetryResult,
   AiTaskRowKind,
+  AiTaskStats,
   AiTaskStatus,
   AiTaskTargetType,
   AiTaskTriggerType,
@@ -173,6 +174,20 @@ export type ExportTasksParams = Omit<ListTasksParams, "page" | "page_size">;
 
 export function listTasks(params: ListTasksParams = {}): Promise<Page<AiTask>> {
   return get<Page<AiTask>>("/admin/ai/tasks", clean(params));
+}
+
+export interface TaskStatsParams {
+  project_id?: number;
+  capability?: Capability;
+  model?: string;
+  /** ISO 8601 UTC，左闭右开；缺省最近 7 天 */
+  start?: string;
+  end?: string;
+}
+
+/** 尝试行 P95 耗时与失败分类（`ai_p95_duration_ms` / `ai_failures_by_category`，docs/12 §3.2 仅详情页） */
+export function getTaskStats(params: TaskStatsParams = {}, config: AxiosRequestConfig = {}): Promise<AiTaskStats> {
+  return get<AiTaskStats>("/admin/ai/tasks/stats", clean(params), config);
 }
 
 /** 详情：`input`、脱敏 `request_payload`、`response_meta`、对账信息；根任务附 `attempts[]` */

@@ -19,15 +19,18 @@ import {
   CAPABILITIES,
   DEFAULT_PAGE_SIZE,
   ERROR_CATEGORY,
+  MEDIA_KIND,
   type AiTask,
   type AiTaskOperation,
   type AiTaskRowKind,
+  type AiTaskStats,
   type AiTaskStatus,
   type AiTaskTargetType,
   type AiTaskTriggerType,
   type Capability,
   type ConflictData,
   type ErrorCategory,
+  type MediaKind,
 } from "@aicreat/shared";
 import * as aiApi from "@/api/ai";
 import { isApiError } from "@/api/client";
@@ -35,6 +38,8 @@ import JsonEditor from "@/components/JsonEditor.vue";
 import ProjectSelect from "@/components/ProjectSelect.vue";
 import StatusTag from "@/components/StatusTag.vue";
 import TaskProgress, { isTerminalTask } from "@/components/TaskProgress.vue";
+import { useNarrow } from "@/composables/useNarrow";
+import { usePermission } from "@/composables/usePermission";
 import { usePolling } from "@/composables/usePolling";
 import { useProjectStore } from "@/store/project";
 import { datedFilename, downloadBlob } from "@/utils/download";
@@ -44,6 +49,7 @@ const { t } = useI18n();
 const route = useRoute();
 const router = useRouter();
 const projectStore = useProjectStore();
+const { has } = usePermission();
 
 // ---------- 筛选（可由 URL 查询参数预置） ----------
 interface Filters {
@@ -173,7 +179,39 @@ function reload() {
 function search() {
   page.value = 1;
   reload();
+  refreshStats();
 }
+
+// ---------- 尝试行统计：P95 耗时 / 失败分类（ai_p95_duration_ms、ai_failures_by_category，docs/12 §3.2 仅详情页） ----------
+// 按当前筛选的项目 / 能力 / 模型 / 时间范围（缺省最近 7 天）实时查询；展开时才请求
+const statsOpen = ref<string[]>([]);
+const narrow = useNarrow(767);
+const stats = ref<AiTaskStats | null>(null);
+const statsLoading = ref(false);
+let statsSeq = 0;
+
+async function loadStats() {
+  const seq = ++statsSeq;
+  statsLoading.value = true;
+  const p = queryParams();
+  try {
+    const res = await aiApi.getTaskStats({ project_id: p.project_id, capability: p.capability, model: p.model, start: p.start, end: p.end });
+    if (seq === statsSeq) stats.value = res;
+  } catch {
+    if (seq === statsSeq) stats.value = null;
+  } finally {
+    if (seq === statsSeq) statsLoading.value = false;
+  }
+}
+
+function refreshStats() {
+  if (statsOpen.value.length) void loadStats();
+  else stats.value = null;
+}
+
+watch(statsOpen, (open) => {
+  if (open.length && !stats.value && !statsLoading.value) void loadStats();
+});
 
 function resetFilters() {
   Object.assign(filters, {
@@ -440,6 +478,12 @@ const meta = computed(() => detail.value?.response_meta ?? null);
 const poll = computed(() => meta.value?.poll ?? null);
 const download = computed(() => meta.value?.download ?? null);
 const detailIsRoot = computed(() => !!detail.value && isRoot(detail.value));
+// 媒体任务的 output_excerpt 是上游临时 URL：后端已返回 null，这里再兜底不展示（docs/10 §2.2、§13 第 1 条）；改为链到素材详情（转存后的 url）
+const detailIsMedia = computed(() => !!detail.value && MEDIA_KIND.includes(detail.value.capability as MediaKind));
+function openAsset(id: number) {
+  detailVisible.value = false;
+  void router.push({ path: "/media/assets", query: { id: String(id) } });
+}
 
 // URL 中带 open=<id> 时直接打开该任务详情（用量对账页跳转）
 onMounted(() => {
@@ -508,6 +552,60 @@ const rowKindOptions = computed(() => AI_TASK_ROW_KIND.map((k) => ({ value: k, l
       />
     </div>
     <div v-if="hasActiveRoots" class="auto-refresh text-secondary">{{ t("aiTasks.autoRefresh") }}</div>
+
+    <el-collapse v-model="statsOpen" class="stats-collapse">
+      <el-collapse-item name="stats">
+        <template #title>
+          <span class="stats-title">{{ t("aiTasks.stats.title") }}</span>
+          <span v-if="stats" class="text-secondary stats-range">{{ formatDateTime(stats.start, false) }} ~ {{ formatDateTime(stats.end, false) }}</span>
+        </template>
+        <div v-loading="statsLoading" class="stats-body">
+          <template v-if="stats">
+            <div class="text-secondary stats-hint">{{ t("aiTasks.stats.hint") }}</div>
+            <el-descriptions :column="narrow ? 1 : 4" border size="small">
+              <el-descriptions-item :label="t('aiTasks.stats.attempts')">{{ formatNumber(stats.attempts) }}</el-descriptions-item>
+              <el-descriptions-item :label="t('aiTasks.stats.succeeded')">{{ formatNumber(stats.succeeded) }}</el-descriptions-item>
+              <el-descriptions-item :label="t('aiTasks.stats.failed')">{{ formatNumber(stats.failed) }}</el-descriptions-item>
+              <el-descriptions-item :label="t('aiTasks.stats.p95')">{{ stats.p95_duration_ms === null ? "-" : formatDuration(stats.p95_duration_ms) }}</el-descriptions-item>
+              <el-descriptions-item :label="t('aiTasks.stats.failuresByCategory')" :span="narrow ? 1 : 4">
+                <span v-if="!stats.failures_by_category.length">-</span>
+                <span v-else class="tag-list">
+                  <el-tag v-for="c in stats.failures_by_category" :key="c.error_category" type="danger" effect="plain" size="small">
+                    {{ t(`status.error_category.${c.error_category}`) }} × {{ formatNumber(c.count) }}
+                  </el-tag>
+                </span>
+              </el-descriptions-item>
+            </el-descriptions>
+            <el-alert v-if="stats.warnings.includes('p95_sampled')" type="info" :closable="false" show-icon :title="t('aiTasks.stats.sampled')" class="stats-warning" />
+            <el-table :data="stats.by_model" size="small" border class="stats-table" :empty-text="t('aiTasks.stats.empty')">
+              <el-table-column :label="t('aiTasks.capability')" width="110">
+                <template #default="{ row: g }">{{ t(`status.capability.${g.capability}`) }}</template>
+              </el-table-column>
+              <el-table-column prop="model" :label="t('aiTasks.model')" min-width="160" show-overflow-tooltip />
+              <el-table-column :label="t('aiTasks.stats.attempts')" width="90" align="right">
+                <template #default="{ row: g }">{{ formatNumber(g.attempts) }}</template>
+              </el-table-column>
+              <el-table-column :label="t('aiTasks.stats.failed')" width="90" align="right">
+                <template #default="{ row: g }">{{ formatNumber(g.failed) }}</template>
+              </el-table-column>
+              <el-table-column :label="t('aiTasks.stats.p95')" width="120" align="right">
+                <template #default="{ row: g }">{{ g.p95_duration_ms === null ? "-" : formatDuration(g.p95_duration_ms) }}</template>
+              </el-table-column>
+              <el-table-column :label="t('aiTasks.stats.failuresByCategory')" min-width="220">
+                <template #default="{ row: g }">
+                  <span v-if="!g.failures_by_category.length">-</span>
+                  <span v-else class="tag-list">
+                    <el-tag v-for="c in g.failures_by_category" :key="c.error_category" type="danger" effect="plain" size="small">
+                      {{ t(`status.error_category.${c.error_category}`) }} × {{ formatNumber(c.count) }}
+                    </el-tag>
+                  </span>
+                </template>
+              </el-table-column>
+            </el-table>
+          </template>
+        </div>
+      </el-collapse-item>
+    </el-collapse>
 
     <el-table v-loading="loading" :data="rows" row-key="id" stripe @expand-change="onExpandChange">
       <el-table-column type="expand" width="40">
@@ -679,7 +777,15 @@ const rowKindOptions = computed(() => AI_TASK_ROW_KIND.map((k) => ({ value: k, l
           <el-descriptions-item :label="t('aiTasks.triggerType')"><StatusTag kind="ai_task_trigger_type" :value="detail.trigger_type" effect="plain" /></el-descriptions-item>
           <el-descriptions-item :label="t('aiTasks.project')">{{ projectLabel(detail.project_id) }}</el-descriptions-item>
           <el-descriptions-item :label="t('aiTasks.fields.target')">
-            <template v-if="detail.target_type">{{ t(`status.ai_task_target_type.${detail.target_type}`) }} #{{ detail.target_id ?? "-" }}</template>
+            <el-button
+              v-if="detail.target_type === 'media_asset' && detail.target_id && has('media.assets.view')"
+              link
+              type="primary"
+              @click="openAsset(detail.target_id)"
+            >
+              {{ t(`status.ai_task_target_type.${detail.target_type}`) }} #{{ detail.target_id }}
+            </el-button>
+            <template v-else-if="detail.target_type">{{ t(`status.ai_task_target_type.${detail.target_type}`) }} #{{ detail.target_id ?? "-" }}</template>
             <template v-else>-</template>
           </el-descriptions-item>
           <el-descriptions-item :label="t('aiTasks.batchId')">{{ detail.batch_id ?? "-" }}</el-descriptions-item>
@@ -707,7 +813,7 @@ const rowKindOptions = computed(() => AI_TASK_ROW_KIND.map((k) => ({ value: k, l
           <el-descriptions-item :label="t('aiTasks.fields.finishedAt')">{{ formatDateTime(detail.finished_at) }}</el-descriptions-item>
           <el-descriptions-item :label="t('aiTasks.fields.createdBy')">{{ detail.created_by ? `#${detail.created_by}` : "-" }}</el-descriptions-item>
           <el-descriptions-item :label="t('common.createdAt')">{{ formatDateTime(detail.created_at) }}</el-descriptions-item>
-          <el-descriptions-item v-if="detail.output_excerpt" :label="t('aiTasks.fields.outputExcerpt')" :span="2">
+          <el-descriptions-item v-if="detail.output_excerpt && !detailIsMedia" :label="t('aiTasks.fields.outputExcerpt')" :span="2">
             <div class="excerpt">{{ detail.output_excerpt }}</div>
           </el-descriptions-item>
         </el-descriptions>
@@ -892,5 +998,33 @@ const rowKindOptions = computed(() => AI_TASK_ROW_KIND.map((k) => ({ value: k, l
   display: inline-flex;
   flex-wrap: wrap;
   gap: 4px;
+}
+.stats-collapse {
+  margin-bottom: 12px;
+}
+.stats-collapse :deep(.el-collapse-item__header) {
+  height: auto;
+  min-height: 48px;
+  line-height: 1.4;
+  padding: 8px 0;
+  flex-wrap: wrap;
+}
+.stats-title {
+  font-weight: 600;
+}
+.stats-range {
+  margin-left: 12px;
+  font-size: 12px;
+}
+.stats-body {
+  min-height: 48px;
+}
+.stats-hint {
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+.stats-warning,
+.stats-table {
+  margin-top: 8px;
 }
 </style>

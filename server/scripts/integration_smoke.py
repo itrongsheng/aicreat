@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """aicreat Mock 模式端到端冒烟脚本（docs/06「自动冒烟脚本」、docs/11 §16.4、docs/12 §14）。
 
-流程：健康检查 → 登录 → 建冒烟项目 → 关键词 → 标题 → 内容（生成 + 审核）→ 图片 → 回填（公网 URL，``published_at`` 置于
-31 天前以触发 ``scheduled`` 收录轮次）→ SEO / GEO 检测（``scheduled`` 轮次后仍全部未命中时手动复查，最多 3 次）→ 删除检测 /
+流程：健康检查 → 登录 → 建冒烟项目 → 关键词 → 标题 → 内容（生成：版本 1、SEO 要素与 FAQ 非空 → 重写小节：版本 2 → 审核）→
+图片 → 回填（公网 URL，``published_at`` 置于 31 天前以触发 ``scheduled`` 收录轮次）→ SEO / GEO 检测（``scheduled`` 轮次后仍全部未命中时手动复查，最多 3 次）→ 删除检测 /
 告警分支（回填返回 404 的公网 URL：基线 ``suspected_deleted`` → 手动检测 ``deleted`` → ``link_deleted`` 告警确认、解决）→
 重算今日 ``daily_stats`` → 总览断言（``seo_index_rate`` / ``geo_cite_rate`` 非 null 且 > 0、``ai_calls > 0``、``cost_cny >= 0``）。
 
@@ -319,7 +319,7 @@ class Smoke:
             ("建冒烟项目", self.step_project),
             ("生成关键词并采用", self.step_keywords),
             ("生成标题并采用", self.step_titles),
-            ("生成内容并审核通过", self.step_content),
+            ("生成内容、重写小节并审核通过", self.step_content),
             ("生成封面图片", self.step_image),
             ("回填公网链接（published_at = 31 天前）", self.step_backfill),
             ("SEO / GEO 收录检测（scheduled 轮次 + 最多 3 次手动复查）", self.step_index_checks),
@@ -433,12 +433,59 @@ class Smoke:
 
         content = wait_for(f"内容 #{self.content_id} 生成完成（generating → ready）", probe, timeout=CONTENT_TIMEOUT)
         log(f"内容 ready：word_count={content.get('word_count')}，seo_title={_short(content.get('seo_title'), 60)}")
+        self._assert_generated(content)
+        self._rewrite_section(content)
         reviewed = self.api.post(f"/admin/contents/{self.content_id}/submit-review", expect_status=(200,))
         if reviewed.get("status") == "reviewing":
             reviewed = self.api.post(f"/admin/contents/{self.content_id}/approve", {"note": "冒烟脚本自动审核"})
         if reviewed.get("status") != "approved":
             raise SmokeError(f"内容审核后状态为 {reviewed.get('status')}（期望 approved）")
         log("内容已审核通过（approved）")
+
+    def _assert_generated(self, content: Mapping[str, Any]) -> None:
+        """docs/09 §14.2：版本 1 存在（``source=generate``），SEO 要素与 FAQ 非空。"""
+        current = content.get("current_version") or {}
+        if content.get("version_count") != 1 or current.get("version_no") != 1 or current.get("source") != "generate":
+            raise SmokeError(
+                f"内容 #{self.content_id} 生成后版本异常：version_count={content.get('version_count')}，"
+                f"current_version={current}（期望 version_no=1、source=generate）",
+            )
+        empty = [name for name in ("summary", "seo_title", "seo_description", "seo_keywords", "faq") if not content.get(name)]
+        if empty:
+            raise SmokeError(f"内容 #{self.content_id} 生成后以下字段为空：{', '.join(empty)}", {"content_id": self.content_id})
+        log(f"版本 1（source=generate）存在；seo_keywords={len(content['seo_keywords'])} 个，faq={len(content['faq'])} 条")
+
+    def _rewrite_section(self, content: Mapping[str, Any]) -> None:
+        """docs/09 §14.2「重写小节（版本 2）」：扩写第 1 个小节，轮询任务至 ``succeeded``，断言版本 2（``source=expand``）且回到 ``ready``。"""
+        if not content.get("outline"):
+            raise SmokeError(f"内容 #{self.content_id} 没有大纲，无法按小节重写")
+        data = self.api.post(f"/admin/contents/{self.content_id}/rewrite",
+                             {"mode": "expand", "scope": "section", "section_index": 1, "instruction": "补充选购注意事项"})
+        task_id = int(data["task_id"])
+        log(f"重写小节 #1（expand）已入队：根任务 #{task_id}")
+
+        def probe() -> dict[str, Any] | None:
+            task = self.api.get(f"/admin/contents/{self.content_id}/task") or {}
+            if task.get("task_id") != task_id:
+                return None
+            status = task.get("status")
+            if status in ("failed", "cancelled", "expired"):
+                raise SmokeError(f"重写根任务 #{task_id} {status}：{task.get('error_category')} {task.get('error_message')}",
+                                 {"task": task})
+            if status == "succeeded":
+                rewritten = self.api.get(f"/admin/contents/{self.content_id}")
+                if rewritten.get("status") == "ready":
+                    return rewritten
+            return None
+
+        rewritten = wait_for(f"内容 #{self.content_id} 小节重写完成", probe, timeout=CONTENT_TIMEOUT)
+        current = rewritten.get("current_version") or {}
+        if rewritten.get("version_count") != 2 or current.get("version_no") != 2 or current.get("source") != "expand":
+            raise SmokeError(
+                f"重写后版本异常：version_count={rewritten.get('version_count')}，current_version={current}"
+                "（期望 version_no=2、source=expand）",
+            )
+        log(f"重写完成：版本 2（source=expand），word_count={content.get('word_count')} → {rewritten.get('word_count')}")
 
     def step_image(self) -> None:
         data = self.api.post("/admin/media/images/generate", {

@@ -468,6 +468,58 @@ def test_sync_fallback_on_route_missing(env: SimpleNamespace, db: Session, monke
     assert asset_of(db, asset.id).status == "ready"
 
 
+CDN_URL = "https://cdn.upstream.example/out/5f1c2a.png"
+
+
+def test_upstream_url_not_exposed_via_ai_tasks(
+    env: SimpleNamespace, db: Session, client: TestClient, super_admin: User, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """docs/10 §2.2、§13 第 1 条：上游临时 URL 不出现在任何前端展示中——AI 任务列表 / 详情（含尝试行与 ``response_meta``）
+    对媒体任务返回 ``output_excerpt=null`` 且不含 ``urls``；库中 ``output_excerpt`` 仍保留供审计（docs/03）。"""
+    real_status = zhiqi_mock.mock_image_status
+
+    def cdn_status(task_id: str) -> dict[str, Any]:
+        body = real_status(task_id)
+        if body.get("status") == "succeeded":
+            body["data"] = [{"url": CDN_URL}]
+        return body
+
+    monkeypatch.setattr(zhiqi_mock, "mock_image_status", cdn_status)
+    data = gen_image(db, env)
+    run_queue(db)
+    root_id = data["task_ids"][0]
+    for _ in range(3):
+        poll(db, root_id)
+    root, asset = task_of(db, root_id), asset_of(db, data["asset_ids"][0])
+    assert root.status == "succeeded" and asset.upstream_url == CDN_URL and root.output_excerpt == CDN_URL
+    headers = super_admin.headers
+    detail = ok_data(client.get(f"{ADMIN_API}/ai/tasks/{root_id}", headers=headers))
+    assert detail["output_excerpt"] is None and all(a["output_excerpt"] is None for a in detail["attempts"])
+    rows = ok_data(client.get(f"{ADMIN_API}/ai/tasks", params={"capability": "image", "row_kind": "all"}, headers=headers))["items"]
+    assert rows and all(r["output_excerpt"] is None for r in rows)
+    assert CDN_URL not in json.dumps([detail, rows], ensure_ascii=False)
+
+    # 同步回退：成功尝试行记录的 urls[] / output_excerpt 同样不对外返回
+    def missing(*_args: Any, **_kw: Any) -> Any:
+        raise ZhiqiError(ErrorCategory.ROUTE_MISSING, "Invalid URL", http_status=404, request_id="req-404")
+
+    monkeypatch.setattr(gw.images, "submit_async", missing)
+    sync = gen_image(db, env)
+    run_queue(db)
+    sync_root = task_of(db, sync["task_ids"][0])
+    attempt = db.scalar(select(AiTask).where(AiTask.root_task_id == sync_root.id, AiTask.status == "succeeded"))
+    upstream = asset_of(db, sync["asset_ids"][0]).upstream_url
+    assert attempt is not None and attempt.output_excerpt == upstream and "urls" in gw.task_meta(attempt)
+    detail = ok_data(client.get(f"{ADMIN_API}/ai/tasks/{sync_root.id}", headers=headers))
+    attempt_detail = ok_data(client.get(f"{ADMIN_API}/ai/tasks/{attempt.id}", headers=headers))
+    assert attempt_detail["output_excerpt"] is None and "urls" not in (attempt_detail["response_meta"] or {})
+    assert attempt_detail["response_meta"]["http_status"] == 200
+    assert upstream not in json.dumps([detail, attempt_detail], ensure_ascii=False)
+    # 文本任务的 output_excerpt 不受影响（内嵌 image_prompt 等非媒体能力照常返回）
+    text_rows = ok_data(client.get(f"{ADMIN_API}/ai/tasks", params={"capability": "content", "row_kind": "all"}, headers=headers))["items"]
+    assert all(r["output_excerpt"] for r in text_rows if r["status"] == "succeeded")
+
+
 # =====================================================================
 # 6. 轮询阶段失败、备选回退、过期、404
 # =====================================================================
@@ -547,6 +599,57 @@ def test_expired_by_deadline_and_upstream(env: SimpleNamespace, db: Session, mon
     poll(db, image["task_ids"][0])
     assert task_of(db, image["task_ids"][0]).status == "expired" and asset_of(db, image["asset_ids"][0]).status == "expired"
     assert len(media_alerts(db)) == 2 and rt(db, env.project.id, "media_failed") == 2
+
+
+def _breaker_alerts(db: Session) -> list[Alert]:
+    db.expire_all()
+    return list(db.scalars(select(Alert).where(Alert.alert_type == "ai_breaker_open", Alert.status == "open")).all())
+
+
+def test_media_storage_counts_in_breaker(env: SimpleNamespace, db: Session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """docs/08 §8.4 / §9.2：轮询 failed(media_storage) 计入 (capability, model) 熔断，达阈值 open + ai_breaker_open 告警。"""
+    settings_service.set_value(db, "ai_routing_config", {"breaker": {"failure_threshold": 1}})
+    data = gen_image(db, env)
+    run_queue(db)
+    monkeypatch.setattr(zhiqi_mock, "mock_image_status", _failing_status("media_storage_upload_failed", "upload failed"))
+    poll(db, data["task_ids"][0])
+    assert task_of(db, data["task_ids"][0]).error_category == "media_storage"
+    cfg = gw._cfg(db)  # noqa: SLF001
+    assert gw.get_breaker(cfg).state("image", "mock-image") == "open"
+    state = redis_client.hgetall("ai:breaker:image:mock-image")                 # open 时失败窗口清空，计数留在 Hash
+    assert (state["state"], state["reason"], int(state["failures"])) == ("open", "failures", 1)
+    alerts = _breaker_alerts(db)
+    assert [(a.target_type, a.target_key) for a in alerts] == [("ai_model", "image:mock-image")]
+    assert json.loads(alerts[0].payload_json)["error_category"] == "media_storage"
+
+
+def test_unknown_poll_failure_not_counted_in_breaker(env: SimpleNamespace, db: Session, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings_service.set_value(db, "ai_routing_config", {"breaker": {"failure_threshold": 1}})
+    data = gen_image(db, env)
+    run_queue(db)
+    monkeypatch.setattr(zhiqi_mock, "mock_image_status", _failing_status("internal_error", "something broke"))
+    poll(db, data["task_ids"][0])
+    assert task_of(db, data["task_ids"][0]).error_category == "unknown"
+    assert gw.get_breaker(gw._cfg(db)).state("image", "mock-image") == "closed"  # noqa: SLF001
+    assert _breaker_alerts(db) == []
+
+
+def test_poll_budget_expiry_counts_timeout_in_breaker(env: SimpleNamespace, db: Session) -> None:
+    """docs/08 §9.2 timeout 行「或轮询超出预算」计入熔断：轮询判定与 recover_stale_tasks ② 两条过期路径都计一次。"""
+    settings_service.set_value(db, "ai_routing_config", {"breaker": {"failure_threshold": 2}})
+    first, second = gen_video(db, env), gen_video(db, env)
+    run_queue(db)
+    db.execute(update(AiTask).where(AiTask.id == first["task_id"]).values(deadline_at=utcnow() - timedelta(seconds=1)))
+    db.commit()
+    poll(db, first["task_id"])
+    assert task_of(db, first["task_id"]).status == "expired"
+    breaker = gw.get_breaker(gw._cfg(db))  # noqa: SLF001
+    assert redis_client.llen("ai:breaker:failures:video:mock-video") == 1 and breaker.state("video", "mock-video") == "closed"
+    expire_root(db, second["task_id"])
+    assert breaker.state("video", "mock-video") == "open"
+    alerts = _breaker_alerts(db)
+    assert [a.target_key for a in alerts] == ["video:mock-video"]
+    assert json.loads(alerts[0].payload_json)["error_category"] == "timeout"
 
 
 def test_three_consecutive_404_fail_route_missing(env: SimpleNamespace, db: Session, monkeypatch: pytest.MonkeyPatch) -> None:

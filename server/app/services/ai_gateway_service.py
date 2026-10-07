@@ -116,6 +116,7 @@ __all__ = [
     "poll_task",
     "preflight",
     "quota_warning",
+    "record_breaker_failure",
     "record_failure",
     "release_reservation",
     "reset_breaker",
@@ -1342,6 +1343,23 @@ def _pause_alert(db: Session, reason: str, task: AiTask, err: ZhiqiError, pause_
             "capability": task.capability, "model": task.model, "task_id": task.id, "pause_seconds": pause_seconds,
         },
     )
+
+
+def record_breaker_failure(db: Session, capability: str | None, model: str | None, err: ZhiqiError) -> bool:
+    """媒体轮询阶段的失败计入熔断（§8.4、§9.2）：上游异步任务 ``failed(media_storage)`` 与轮询超出预算 / 上游 ``expired``
+    （``timeout``）不经尝试行，由 ``media_service`` / ``recover_stale_tasks`` 在根任务终态事务内调用。``breaker.record_failure``
+    非 open → open 时 ``raise_alert(ai_breaker_open)``；不提交（调用方提交）。Redis 异常只记日志。返回是否发生 open 转换。"""
+    if not capability or not model:
+        return False
+    cfg = _cfg(db)
+    try:
+        opened = get_breaker(cfg).record_failure(capability, model, ErrorCategory(err.category))
+    except redis.RedisError as exc:
+        logger.warning("熔断计数失败 %s:%s: %s", capability, model, exc)
+        return False
+    if opened:
+        _breaker_alert(db, capability, model, cfg, err)
+    return opened
 
 
 def record_failure(db: Session, attempt_task: AiTask, err: ZhiqiError, *, count_breaker: bool = True) -> None:

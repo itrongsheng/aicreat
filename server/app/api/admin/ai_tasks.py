@@ -1,6 +1,6 @@
 """AI 任务（``/admin/ai/tasks``，docs/04 §6.15、§7.17；docs/08 §7.7）。
 
-按 ``project_id IN P`` 过滤（无项目的探测任务只对总后台可见，docs/13 §6.3）；``/export`` 先于 ``/{id}`` 注册。
+按 ``project_id IN P`` 过滤（无项目的探测任务只对总后台可见，docs/13 §6.3）；``/export``、``/stats`` 先于 ``/{id}`` 注册。
 """
 
 from __future__ import annotations
@@ -97,6 +97,25 @@ def export_tasks(
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f"attachment; filename=\"{filename}\"; filename*=UTF-8''{quote(filename)}"},
     )
+
+
+@router.get("/stats", summary="AI 尝试行 P95 耗时与失败分类")
+def task_stats(
+    project_id: int | None = Query(None, gt=0),
+    capability: Capability | None = Query(None),
+    model: str | None = Query(None, max_length=120),
+    start: datetime | None = Query(None, description="ISO 8601 UTC，含；缺省 end − 7 天"),
+    end: datetime | None = Query(None, description="ISO 8601 UTC，不含；缺省当前时间"),
+    _admin: Admin = Depends(require_permission("ai.tasks.view")),
+    scope: DataScope = Depends(get_data_scope),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """``ai_p95_duration_ms`` / ``ai_failures_by_category``（docs/12 §3.2「仅详情页」、§10.2；docs/08 §15）：
+    range 内尝试行实时查询，不经 ``/admin/stats/*``；按 ``project_id IN P`` 过滤。"""
+    return ok(ai_task_service.attempt_stats(
+        db, scope, project_id=project_id, capability=capability, model=model or None,
+        start=start, end=end,
+    ))
 
 
 @router.get("/{task_id}", summary="AI 任务详情")

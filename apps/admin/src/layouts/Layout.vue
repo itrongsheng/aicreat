@@ -91,6 +91,7 @@ import LangSwitch from "@/components/LangSwitch.vue";
 import OwnerSelect from "@/components/OwnerSelect.vue";
 import ProjectSelect from "@/components/ProjectSelect.vue";
 import ThemeSwitch from "@/components/ThemeSwitch.vue";
+import { useNarrow } from "@/composables/useNarrow";
 import { usePermission } from "@/composables/usePermission";
 import { useAlertsStore } from "@/store/alerts";
 import { useAuthStore } from "@/store/auth";
@@ -133,6 +134,18 @@ function toggleCollapse() {
     /* ignore */
   }
 }
+
+// 移动端（< 768px，docs/12 §5.7）：侧栏不占内容宽度，改为左侧抽屉（顶栏折叠按钮开合，切换路由后关闭）
+const isMobile = useNarrow(767);
+const drawerOpen = ref(false);
+const menuCollapsed = computed(() => !isMobile.value && collapsed.value);
+const menuToggleExpanded = computed(() => (isMobile.value ? drawerOpen.value : !collapsed.value));
+function onToggleMenu() {
+  if (isMobile.value) drawerOpen.value = !drawerOpen.value;
+  else toggleCollapse();
+}
+watch(() => route.fullPath, () => (drawerOpen.value = false));
+watch(isMobile, () => (drawerOpen.value = false));
 
 const visibleMenuGroups = computed(() =>
   menuGroups.map((g) => ({ ...g, items: g.items.filter((m) => auth.hasPermission(m.permission)) })).filter((g) => g.items.length > 0),
@@ -279,14 +292,15 @@ async function submitPassword() {
 </script>
 
 <template>
-  <el-container class="layout">
-    <el-aside :width="collapsed ? '64px' : '220px'" class="layout-aside">
+  <el-container class="layout" :class="{ 'layout--mobile': isMobile, 'layout--menu-open': isMobile && drawerOpen }">
+    <div v-if="isMobile && drawerOpen" class="layout-mask" @click="drawerOpen = false" />
+    <el-aside :width="menuCollapsed ? '64px' : '220px'" class="layout-aside">
       <div class="layout-brand" @click="router.push('/')">
         <img :src="logoUrl" alt="" class="layout-logo" />
-        <span v-show="!collapsed" class="layout-brand-text">aicreat</span>
+        <span v-show="!menuCollapsed" class="layout-brand-text">aicreat</span>
       </div>
       <el-scrollbar class="layout-menu-scroll">
-        <el-menu :default-active="activeMenu" :default-openeds="defaultOpeneds" :collapse="collapsed" :collapse-transition="false" router class="layout-menu">
+        <el-menu :default-active="activeMenu" :default-openeds="defaultOpeneds" :collapse="menuCollapsed" :collapse-transition="false" router class="layout-menu">
           <template v-for="group in visibleMenuGroups" :key="group.key">
             <el-menu-item v-if="group.key === 'console'" :index="group.items[0].path">
               <el-icon><component :is="GROUP_ICONS[group.key]" /></el-icon>
@@ -305,26 +319,28 @@ async function submitPassword() {
     </el-aside>
 
     <el-container class="layout-body">
-      <el-header class="layout-header" height="56px">
+      <el-header class="layout-header" :height="isMobile ? 'auto' : '56px'">
         <div class="layout-header-left">
-          <el-button text circle :title="collapsed ? t('common.expand') : t('common.collapse')" @click="toggleCollapse">
-            <el-icon :size="18"><Expand v-if="collapsed" /><Fold v-else /></el-icon>
+          <el-button text circle :title="menuToggleExpanded ? t('common.collapse') : t('common.expand')" class="layout-menu-toggle" @click="onToggleMenu">
+            <el-icon :size="18"><Fold v-if="menuToggleExpanded" /><Expand v-else /></el-icon>
           </el-button>
-          <el-breadcrumb separator="/" class="layout-breadcrumb">
+          <el-breadcrumb v-if="!isMobile" separator="/" class="layout-breadcrumb">
             <el-breadcrumb-item v-for="(crumb, idx) in breadcrumbs" :key="idx" :to="crumb.to">{{ crumb.label }}</el-breadcrumb-item>
           </el-breadcrumb>
         </div>
         <div class="layout-header-right">
-          <OwnerSelect v-if="showOwnerSelect" width="160px" />
-          <ProjectSelect v-if="showProjectSelect" width="180px" />
+          <template v-if="!isMobile">
+            <OwnerSelect v-if="showOwnerSelect" width="160px" />
+            <ProjectSelect v-if="showProjectSelect" width="180px" />
+          </template>
           <el-tag v-if="auth.zhiqiMode === 'mock'" type="warning" effect="plain" size="small">{{ t("common.mockMode") }}</el-tag>
           <AlertBadge v-if="showAlertBadge" />
           <LangSwitch />
           <ThemeSwitch />
           <el-dropdown trigger="click" @command="onUserCommand">
             <span class="layout-user">
-              <span class="layout-user-name">{{ auth.displayName }}</span>
-              <span v-if="auth.admin?.group" class="layout-user-group">{{ auth.admin.group.name }}</span>
+              <span v-if="!isMobile" class="layout-user-name">{{ auth.displayName }}</span>
+              <span v-if="!isMobile && auth.admin?.group" class="layout-user-group">{{ auth.admin.group.name }}</span>
               <el-tag size="small" :type="isAllScope ? 'primary' : 'info'" effect="plain">{{ scopeLabel }}</el-tag>
               <el-icon><ArrowDown /></el-icon>
             </span>
@@ -332,6 +348,7 @@ async function submitPassword() {
               <el-dropdown-menu>
                 <el-dropdown-item disabled>
                   <div class="layout-user-meta">
+                    <div v-if="isMobile">{{ auth.displayName }}</div>
                     <div>{{ auth.admin?.username }}</div>
                     <div v-if="auth.admin?.group">{{ t("auth.group") }}：{{ auth.admin.group.name }}</div>
                   </div>
@@ -341,6 +358,11 @@ async function submitPassword() {
               </el-dropdown-menu>
             </template>
           </el-dropdown>
+        </div>
+        <!-- 移动端：用户 / 项目选择器单独一行，避免顶栏横向溢出 -->
+        <div v-if="isMobile && (showOwnerSelect || showProjectSelect)" class="layout-header-scope">
+          <OwnerSelect v-if="showOwnerSelect" width="100%" />
+          <ProjectSelect v-if="showProjectSelect" width="100%" />
         </div>
       </el-header>
 
@@ -478,5 +500,54 @@ async function submitPassword() {
 .layout-owner-back {
   margin-left: 12px;
   vertical-align: baseline;
+}
+
+/* ---------- 移动端（< 768px）：侧栏为左侧抽屉，内容区占满宽度 ---------- */
+.layout-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  background: rgba(0, 0, 0, 0.45);
+}
+.layout--mobile .layout-aside {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 2001;
+  transform: translateX(-100%);
+  transition: transform 0.2s;
+  box-shadow: var(--el-box-shadow-dark);
+}
+.layout--mobile.layout--menu-open .layout-aside {
+  transform: none;
+}
+.layout--mobile .layout-body {
+  width: 100%;
+}
+.layout--mobile .layout-header {
+  flex-wrap: wrap;
+  row-gap: 8px;
+  padding: 8px 12px;
+}
+.layout--mobile .layout-header-right {
+  gap: 4px;
+  min-width: 0;
+}
+.layout--mobile .layout-header-right :deep(.lang-label) {
+  display: none;
+}
+.layout-header-scope {
+  display: flex;
+  flex-basis: 100%;
+  gap: 8px;
+  min-width: 0;
+}
+.layout-header-scope > * {
+  flex: 1 1 0;
+  min-width: 0;
+}
+.layout--mobile .layout-main {
+  padding: 12px;
 }
 </style>

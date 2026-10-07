@@ -55,7 +55,8 @@ from app.core.config import settings
 from app.core.database import SessionLocal
 from app.core.locks import acquire_lock, is_locked, release_lock
 from app.core.redis import redis_client
-from app.core.zhiqi.types import TEXT_CAPABILITIES
+from app.core.zhiqi.errors import ZhiqiError
+from app.core.zhiqi.types import TEXT_CAPABILITIES, ErrorCategory
 from app.models import (
     AiTask,
     Alert,
@@ -436,6 +437,8 @@ def expire_polling(db: Session, now: datetime) -> dict[str, int]:
                 hook(db, root)
             else:
                 fail_media_assets(db, root, status="expired", category="timeout", message=EXPIRED_MESSAGE)
+            # docs/08 §9.2 timeout 行：轮询超出预算计入熔断（与 media_service 轮询判定的过期一致）
+            gateway.record_breaker_failure(db, root.capability, root.model, ZhiqiError(ErrorCategory.TIMEOUT, EXPIRED_MESSAGE))
             gateway.finalize_root(db, root, "expired", error_category="timeout", error_message=EXPIRED_MESSAGE)
             db.commit()
             ai_task_service.notify_batch_finished(root.batch_id)

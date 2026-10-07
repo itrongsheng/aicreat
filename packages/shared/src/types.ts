@@ -813,6 +813,7 @@ export interface AiTask {
   pause_count: number;
   request_id: string | null;
   upstream_task_id: string | null;
+  /** 输出摘录；媒体（image / video）任务恒为 null（上游临时 URL 不对外展示，docs/10 §2.2） */
   output_excerpt: string | null;
   prompt_tokens: number;
   completion_tokens: number;
@@ -1095,6 +1096,41 @@ export interface UsageLastPull {
 /** `POST /admin/ai/tasks/{id}/retry` */
 export interface AiTaskRetryResult {
   task_id: number;
+}
+
+/** 失败分类计数（`failed` 尝试行按 `error_category` 计数，降序） */
+export interface AiFailureCategoryCount {
+  error_category: ErrorCategory;
+  count: number;
+}
+
+/** `GET /admin/ai/tasks/stats` 中 `capability × model` 明细 */
+export interface AiTaskStatsGroup {
+  capability: Capability;
+  model: string;
+  attempts: number;
+  succeeded: number;
+  failed: number;
+  /** 成功尝试行 `duration_ms` 的 P95（最近秩法）；无成功行为 null */
+  p95_duration_ms: number | null;
+  failures_by_category: AiFailureCategoryCount[];
+}
+
+/**
+ * `GET /admin/ai/tasks/stats`：`ai_p95_duration_ms` / `ai_failures_by_category`（docs/12 §3.2「仅详情页」）。
+ * 口径：range 内尝试行、`status IN (succeeded, failed)`、`trigger_type != health_probe`；按数据范围过滤。
+ */
+export interface AiTaskStats {
+  start: string;
+  end: string;
+  attempts: number;
+  succeeded: number;
+  failed: number;
+  p95_duration_ms: number | null;
+  failures_by_category: AiFailureCategoryCount[];
+  by_model: AiTaskStatsGroup[];
+  /** `p95_sampled`：成功尝试行超过 1 万条，按最近 1 万条近似 */
+  warnings: string[];
 }
 
 /** `POST /admin/ai/routes` 请求体（项目覆盖路由，`project_id > 0`） */

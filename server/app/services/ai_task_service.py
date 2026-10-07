@@ -21,13 +21,14 @@ import importlib
 import importlib.util
 import io
 import logging
+import math
 import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import wait as futures_wait
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Literal
 
 from sqlalchemy import func, select, update
@@ -662,8 +663,22 @@ def _num(value: Any) -> float | None:
     return round(float(value), 6) if value is not None else None
 
 
+def _output_excerpt(task: AiTask) -> str | None:
+    """媒体（``image`` / ``video``）根任务与尝试行的 ``output_excerpt`` 是上游临时 URL（``data[0].url``）：库中保留供审计
+    （docs/03），接口一律返回 ``null``——上游 URL 不出现在任何前端展示中（docs/10 §2.2、§13 第 1 条）。"""
+    return None if task.capability in MEDIA_CAPABILITIES else task.output_excerpt
+
+
+def _response_meta(task: AiTask) -> Any:
+    """详情的 ``response_meta``：媒体尝试行（同步端点 / 回退）记录的 ``urls[]`` 为上游临时 URL，不对外返回（同 ``_output_excerpt``）。"""
+    meta = gateway._loads(task.response_meta_json, None)  # noqa: SLF001
+    if isinstance(meta, dict) and task.capability in MEDIA_CAPABILITIES and "urls" in meta:
+        meta = {k: v for k, v in meta.items() if k != "urls"}
+    return meta
+
+
 def task_item(task: AiTask) -> dict[str, Any]:
-    """任务行对象（docs/04 §7.17）；尝试行的 ``input`` 为 ``null``。"""
+    """任务行对象（docs/04 §7.17）；尝试行的 ``input`` 为 ``null``；媒体任务的 ``output_excerpt`` 为 ``null``（见 ``_output_excerpt``）。"""
     return {
         "id": task.id,
         "project_id": task.project_id,
@@ -686,7 +701,7 @@ def task_item(task: AiTask) -> dict[str, Any]:
         "pause_count": task.pause_count,
         "request_id": task.request_id,
         "upstream_task_id": task.upstream_task_id,
-        "output_excerpt": task.output_excerpt,
+        "output_excerpt": _output_excerpt(task),
         "prompt_tokens": task.prompt_tokens,
         "completion_tokens": task.completion_tokens,
         "cache_tokens": task.cache_tokens,
@@ -774,7 +789,7 @@ def get_task_detail(db: Session, scope: DataScope, task_id: int) -> dict[str, An
     task = get_visible(db, scope, AiTask, task_id)
     item = task_item(task)
     item["request_payload"] = gateway._loads(task.request_payload_json, None)  # noqa: SLF001
-    item["response_meta"] = gateway._loads(task.response_meta_json, None)  # noqa: SLF001
+    item["response_meta"] = _response_meta(task)
     if task.root_task_id is None:
         attempts = db.scalars(select(AiTask).where(AiTask.root_task_id == task.id)).all()
         attempts = sorted(attempts, key=lambda a: (a.candidate_index, a.attempt, a.segment_index or 0, a.id))
@@ -933,6 +948,120 @@ def export_tasks(db: Session, scope: DataScope, **filters: Any) -> tuple[str, st
         writer.writerow(["" if values.get(key) is None else values.get(key) for key, _ in AI_TASK_EXPORT_COLUMNS])
     filename = f"ai-tasks-{stats_service.today_date(db).strftime('%Y%m%d')}.csv"
     return filename, buffer.getvalue()
+
+
+# =====================================================================
+# 详情页指标：ai_p95_duration_ms / ai_failures_by_category（docs/12 §3.2、§10.2；docs/08 §15）
+# =====================================================================
+
+ATTEMPT_STATS_DEFAULT_DAYS = 7          # 未传 start/end 时取最近 7 天
+ATTEMPT_STATS_MAX_DAYS = 366
+ATTEMPT_STATS_P95_SAMPLE = 10000        # 超过 1 万条成功尝试行按最近 1 万条近似（同 time_to_index_hours_p50）
+
+
+def percentile_95(values: list[int]) -> int | None:
+    """``PERCENTILE_95``：最近秩法（nearest-rank，``ceil(0.95·n)``-th 最小值）；空集 ``None``。"""
+    if not values:
+        return None
+    ordered = sorted(values)
+    rank = max(1, math.ceil(0.95 * len(ordered)))
+    return int(ordered[rank - 1])
+
+
+def attempt_stats(
+    db: Session,
+    scope: DataScope,
+    *,
+    project_id: int | None = None,
+    capability: str | None = None,
+    model: str | None = None,
+    start: datetime | None = None,
+    end: datetime | None = None,
+) -> dict[str, Any]:
+    """``GET /admin/ai/tasks/stats``：range 内尝试行实时查询（``root_task_id IS NOT NULL``、``status IN
+    ('succeeded','failed')``、``trigger_type != 'health_probe'``，按 ``project_id IN P`` 过滤）。
+
+    返回 ``p95_duration_ms``（成功尝试行 ``duration_ms`` 的 P95）、``failures_by_category``（失败尝试行按
+    ``error_category`` 计数，降序）与 ``by_model``（``capability × model`` 维度的同口径明细）。"""
+    end_utc = to_utc_naive(end) if end is not None else utcnow()
+    start_utc = to_utc_naive(start) if start is not None else end_utc - timedelta(days=ATTEMPT_STATS_DEFAULT_DAYS)
+    if start_utc >= end_utc or end_utc - start_utc > timedelta(days=ATTEMPT_STATS_MAX_DAYS):
+        raise BusinessError(
+            "参数错误", code=CODE_BAD_REQUEST,
+            data=[field_error(["query", "start"], f"start 必须早于 end，且跨度不超过 {ATTEMPT_STATS_MAX_DAYS} 天", "range",
+                              iso_utc(start_utc))],
+        )
+    conditions = [
+        # 未传 end 时不设上界（当前秒内新建的行 created_at == now，左闭右开会漏掉）
+        *_task_conditions(row_kind="attempt", project_id=project_id, capability=capability, model=model,
+                          start=start_utc, end=end_utc if end is not None else None),
+        AiTask.status.in_(("succeeded", "failed")),
+        AiTask.trigger_type != "health_probe",
+    ]
+
+    groups: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def _group(cap: str, mdl: str | None) -> dict[str, Any]:
+        key = (cap, mdl or "")
+        if key not in groups:
+            groups[key] = {"capability": cap, "model": mdl or "", "attempts": 0, "succeeded": 0, "failed": 0,
+                           "p95_duration_ms": None, "failures_by_category": {}, "_durations": []}
+        return groups[key]
+
+    count_stmt = select(AiTask.capability, AiTask.model, AiTask.status, AiTask.error_category, func.count(AiTask.id)).where(
+        *conditions).group_by(AiTask.capability, AiTask.model, AiTask.status, AiTask.error_category)
+    failures: dict[str, int] = {}
+    succeeded_total = failed_total = 0
+    for cap, mdl, status, category, count in db.execute(scope_by_project(count_stmt, AiTask.project_id, scope)).all():
+        group = _group(cap, mdl)
+        n = int(count or 0)
+        group["attempts"] += n
+        if status == "succeeded":
+            group["succeeded"] += n
+            succeeded_total += n
+        else:
+            group["failed"] += n
+            failed_total += n
+            cat = category or "unknown"
+            group["failures_by_category"][cat] = group["failures_by_category"].get(cat, 0) + n
+            failures[cat] = failures.get(cat, 0) + n
+
+    duration_stmt = (
+        select(AiTask.capability, AiTask.model, AiTask.duration_ms)
+        .where(*conditions, AiTask.status == "succeeded", AiTask.duration_ms.is_not(None))
+        .order_by(AiTask.created_at.desc(), AiTask.id.desc())
+        .limit(ATTEMPT_STATS_P95_SAMPLE + 1)
+    )
+    samples = db.execute(scope_by_project(duration_stmt, AiTask.project_id, scope)).all()
+    warnings: list[str] = []
+    if len(samples) > ATTEMPT_STATS_P95_SAMPLE:
+        samples = samples[:ATTEMPT_STATS_P95_SAMPLE]
+        warnings.append("p95_sampled")
+    all_durations: list[int] = []
+    for cap, mdl, duration in samples:
+        _group(cap, mdl)["_durations"].append(int(duration))
+        all_durations.append(int(duration))
+
+    def _categories(counts: dict[str, int]) -> list[dict[str, Any]]:
+        return [{"error_category": k, "count": v} for k, v in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
+
+    by_model = []
+    for group in sorted(groups.values(), key=lambda g: (-g["attempts"], g["capability"], g["model"])):
+        durations = group.pop("_durations")
+        group["p95_duration_ms"] = percentile_95(durations)
+        group["failures_by_category"] = _categories(group["failures_by_category"])
+        by_model.append(group)
+    return {
+        "start": iso_utc(start_utc),
+        "end": iso_utc(end_utc),
+        "attempts": succeeded_total + failed_total,
+        "succeeded": succeeded_total,
+        "failed": failed_total,
+        "p95_duration_ms": percentile_95(all_durations),
+        "failures_by_category": _categories(failures),
+        "by_model": by_model,
+        "warnings": warnings,
+    }
 
 
 

@@ -439,6 +439,87 @@ def test_tasks_export_csv(client: TestClient, db: Session, super_admin: User, ow
     assert len(full.strip().splitlines()) == 3
 
 
+def _stat_attempt(db: Session, root: AiTask, *, model: str = "mock-text", status: str = "succeeded", duration_ms: int | None = None,
+                  error_category: str | None = None, trigger_type: str | None = None, created_at: Any = None) -> AiTask:
+    row = AiTask(
+        project_id=root.project_id, capability=root.capability, operation=root.operation,
+        trigger_type=trigger_type or root.trigger_type, root_task_id=root.id, candidate_index=0, attempt=1, model=model,
+        protocol="openai_chat", status=status, duration_ms=duration_ms, error_category=error_category,
+    )
+    if created_at is not None:
+        row.created_at = created_at
+    db.add(row)
+    db.commit()
+    return row
+
+
+def test_tasks_stats_p95_and_failures_by_category(client: TestClient, db: Session, super_admin: User, owner_a: User,
+                                                  read_only: User, pa: Project, pb: Project) -> None:
+    from datetime import timedelta
+
+    ta = root_task(db, pa, target_type="keyword", target_id=1)
+    ta.duration_ms = 999_999  # 根任务行不计
+    db.commit()
+    for i in range(1, 21):  # 100..2000 → 最近秩 P95 = ceil(0.95×20)=第 19 个 = 1900
+        _stat_attempt(db, ta, duration_ms=i * 100)
+    _stat_attempt(db, ta, status="failed", duration_ms=50, error_category="timeout")
+    _stat_attempt(db, ta, status="failed", error_category="timeout")
+    _stat_attempt(db, ta, status="failed", error_category="model_unrouted", model="mock-b")
+    _stat_attempt(db, ta, model="mock-b", duration_ms=300)
+    _stat_attempt(db, ta, status="running", duration_ms=88_888)                      # 非终态不计
+    _stat_attempt(db, ta, status="cancelled", error_category="cancelled")            # cancelled 不计
+    _stat_attempt(db, ta, trigger_type="health_probe", duration_ms=77_777)           # 探测不计
+    _stat_attempt(db, ta, trigger_type="health_probe", status="failed", error_category="auth_failed")
+    _stat_attempt(db, ta, duration_ms=66_666, created_at=utcnow() - timedelta(days=30))  # range 外
+    tb = root_task(db, pb, target_type="keyword", target_id=2)
+    _stat_attempt(db, tb, duration_ms=55_555)
+    _stat_attempt(db, tb, status="failed", error_category="rate_limited")
+
+    data = ok_data(client.get(f"{AI}/tasks/stats", params={"project_id": pa.id}, headers=super_admin.headers))
+    assert (data["attempts"], data["succeeded"], data["failed"]) == (24, 21, 3)
+    # 21 个成功耗时：100..2000 + 300 → 排序后第 ceil(0.95×21)=20 个 = 1900
+    assert data["p95_duration_ms"] == 1900
+    assert data["failures_by_category"] == [{"error_category": "timeout", "count": 2}, {"error_category": "model_unrouted", "count": 1}]
+    by_model = {(g["capability"], g["model"]): g for g in data["by_model"]}
+    assert by_model[("keyword", "mock-text")]["p95_duration_ms"] == 1900
+    assert by_model[("keyword", "mock-b")] == {
+        "capability": "keyword", "model": "mock-b", "attempts": 2, "succeeded": 1, "failed": 1, "p95_duration_ms": 300,
+        "failures_by_category": [{"error_category": "model_unrouted", "count": 1}],
+    }
+    assert data["warnings"] == [] and data["start"] and data["end"]
+    assert ai_task_service.percentile_95([]) is None and ai_task_service.percentile_95([5]) == 5
+
+    # model / capability 筛选
+    only_b = ok_data(client.get(f"{AI}/tasks/stats", params={"model": "mock-b"}, headers=super_admin.headers))
+    assert (only_b["attempts"], only_b["p95_duration_ms"]) == (2, 300)
+    assert ok_data(client.get(f"{AI}/tasks/stats", params={"capability": "image"}, headers=super_admin.headers))["attempts"] == 0
+    # 显式 range 覆盖 30 天前的行
+    wide = ok_data(client.get(f"{AI}/tasks/stats", params={
+        "project_id": pa.id, "start": (utcnow() - timedelta(days=60)).isoformat() + "Z", "end": (utcnow() + timedelta(days=1)).isoformat() + "Z",
+    }, headers=super_admin.headers))
+    assert wide["succeeded"] == 22 and wide["p95_duration_ms"] == 2000
+
+    # 数据范围：own 用户只见自己项目的尝试行；总后台全部
+    mine = ok_data(client.get(f"{AI}/tasks/stats", headers=owner_a.headers))
+    assert (mine["attempts"], mine["p95_duration_ms"]) == (24, 1900)
+    assert {c["error_category"] for c in mine["failures_by_category"]} == {"timeout", "model_unrouted"}
+    assert ok_data(client.get(f"{AI}/tasks/stats", params={"project_id": pb.id}, headers=owner_a.headers))["attempts"] == 0
+    everyone = ok_data(client.get(f"{AI}/tasks/stats", headers=super_admin.headers))
+    assert everyone["attempts"] == 26 and {"error_category": "rate_limited", "count": 1} in everyone["failures_by_category"]
+    assert everyone["p95_duration_ms"] == 2000  # 22 个成功：第 ceil(20.9)=21 个
+
+    # 参数校验与权限
+    err(client.get(f"{AI}/tasks/stats", params={"start": "2026-01-02T00:00:00Z", "end": "2026-01-01T00:00:00Z"}, headers=super_admin.headers), 400)
+    err(client.get(f"{AI}/tasks/stats", params={"capability": "bogus"}, headers=super_admin.headers), 400)
+    assert ok_data(client.get(f"{AI}/tasks/stats", headers=read_only.headers))["attempts"] >= 0
+
+
+def test_tasks_stats_requires_permission(client: TestClient, users: UserFactory) -> None:
+    group = users.custom_group("仅看板", ["dashboard.view"])
+    user = users.create(group, username="dash_only")
+    assert err(client.get(f"{AI}/tasks/stats", headers=user.headers), 403)["data"] == {"permission": "ai.tasks.view"}
+
+
 # =====================================================================
 # 用量对账
 # =====================================================================

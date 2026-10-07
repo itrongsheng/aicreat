@@ -1425,7 +1425,7 @@ Content-Type: application/json
 | 指标 | 来源 | 用途 / 告警 |
 | --- | --- | --- |
 | `ai_calls`、`ai_success_rate`（按能力/模型/项目/人员/日）；`ai_avg_duration_ms`（按能力/模型/项目/日，不支持人员维度：`admin` 行不填 `ai_duration_ms_sum`） | `daily_stats`（尝试行）；今日 `stats:rt:{date}:{project_id}` | 控制台 KPI 与趋势（[12-dashboard-reports](./12-dashboard-reports.md)） |
-| `ai_failures_by_category`、`ai_p95_duration_ms` | `ai_tasks` 尝试行实时查询 | AI 任务详情页；`top_failed_models` 榜单 |
+| `ai_failures_by_category`、`ai_p95_duration_ms` | `ai_tasks` 尝试行实时查询（`GET /admin/ai/tasks/stats`） | AI 任务详情页；`top_failed_models` 榜单 |
 | 连续失败尝试行 | `evaluate_alerts` ②：同 `capability+model` 30 分钟内连续失败 ≥ 5（不含 cancelled、`trigger_type != health_probe`） | `ai_task_failures`（critical），同模型出现成功尝试行自动解决 |
 | 熔断状态 | `ai:breaker:*` 快照 | `ai_breaker_open`（warning）；`Routes.vue`/`/ai/health` |
 | 健康探测结果与延迟 | `ai:health:*`、`ai_models.last_health_*` | `ai_upstream_unavailable`（critical，连续 2 次失败） |

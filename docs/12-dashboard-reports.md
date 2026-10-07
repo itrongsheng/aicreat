@@ -976,7 +976,7 @@ Content-Type: application/json
 | `fastest_indexed` | `publish_links INDEX(published_at)` + `first_indexed_at` 范围过滤 + `created_at <= published_at + INTERVAL 72 HOUR`（排除历史补录，同上），`JOIN contents`、`publish_platforms`，`ORDER BY (first_indexed_at − published_at) LIMIT n` | < 300 ms |
 | 总览整体 | 未命中缓存 < 1.5 s，命中缓存 < 100 ms | — |
 
-`ai_p95_duration_ms` 与 `ai_failures_by_category` 是 `ai_tasks` 的实时查询，只在详情页按需计算（`ai_tasks INDEX(capability, model, created_at)`），不进入总览与报表接口。
+`ai_p95_duration_ms` 与 `ai_failures_by_category` 是 `ai_tasks` 的实时查询，只在详情页按需计算（`ai_tasks INDEX(capability, model, created_at)`），不进入总览与报表接口；接口为 `GET /admin/ai/tasks/stats`（[04-api-spec](./04-api-spec.md) §6.15），由 AI 任务页（`ai/Tasks.vue`）顶部的统计条展示。
 
 ### 10.3 缓存
 

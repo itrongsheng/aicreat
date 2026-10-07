@@ -960,7 +960,10 @@ def _reschedule(root: AiTask, cfg: Mapping[str, Any], now: datetime) -> None:
 
 
 def _expire(db: Session, root: AiTask, message: str) -> None:
+    """轮询超出 ``deadline_at`` / 上游 ``expired``：资产 ``expired`` + 告警、根任务 ``expired(timeout)``；按 docs/08 §9.2
+    ``timeout`` 行（「或轮询超出预算」计入熔断）对该根任务的 ``(capability, model)`` 计一次熔断失败。"""
     on_task_expired(db, root, message)
+    gateway.record_breaker_failure(db, root.capability, root.model, ZhiqiError(ErrorCategory.TIMEOUT, message))
     gateway.finalize_root(db, root, "expired", error_category=ErrorCategory.TIMEOUT.value, error_message=message)
 
 
@@ -1094,6 +1097,9 @@ def poll_root(db: Session, root: AiTask, *, now: datetime | None = None) -> int 
     if status.status == TaskStatus.FAILED:
         category = classify_task_failure(status.error_code, status.error_message)
         message = sanitize_error_message(status.error_message or status.error_code or "上游任务失败") or "上游任务失败"
+        if category == ErrorCategory.MEDIA_STORAGE:
+            # docs/08 §8.4 / §9.2：media_storage 计入熔断（无尝试行，按根任务当前模型计；在回退 / 失败之前，回退会改写 root）
+            gateway.record_breaker_failure(db, root.capability, root.model, ZhiqiError(category, message))
         if category == ErrorCategory.MEDIA_STORAGE and _fallback_media_storage(db, root, assets, message) is not None:
             db.commit()
             return None
