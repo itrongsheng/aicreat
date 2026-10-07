@@ -11,6 +11,7 @@
     "dev:worker": "cd server && .venv\\Scripts\\python.exe -m app.worker",
     "dev:monitor": "cd server && .venv\\Scripts\\python.exe -m app.monitor_worker",
     "dev:admin": "pnpm --filter admin dev",
+    "dev:setup": "powershell -ExecutionPolicy Bypass -File scripts/dev-setup.ps1",
     "dev:restart": "powershell -ExecutionPolicy Bypass -File scripts/dev-restart.ps1",
     "build:admin": "pnpm --filter admin build",
     "build:shared": "pnpm --filter @aicreat/shared build",

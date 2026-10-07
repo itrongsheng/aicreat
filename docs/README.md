@@ -110,9 +110,9 @@ aicreat 是面向运营/内容团队的 **B 端内部工具**：在「项目/专
 | `apps/admin/src/i18n/locales/` | 界面词条 `zh-CN.ts` / `en-US.ts`（vue-i18n） |
 | `packages/shared/src/` | `@aicreat/shared`：`types.ts`（以 API 字段名声明的接口）、`enums.ts`（全部状态枚举，`as const`）、`constants.ts`（`API_PREFIX`、`DEFAULT_PAGE_SIZE`、`MAX_PAGE_SIZE`、`SUPPORTED_LOCALES`、`UPLOAD_LIMITS`、`IMAGE_RESOLUTIONS`、`ASPECT_RATIOS`、`VIDEO_RESOLUTIONS`、`CAPABILITIES`、`BUSINESS_CODES`） |
 | `nginx/nginx.conf` | `/api/` → server:8000；`/media/` → server:8000；`/admin/` → admin dist；`/` → 302 `/admin/` |
-| `scripts/` | `dev-restart.ps1`（重启 API/worker/monitor/admin，端口占用自动换端口）、`db-backup.sh`（mysqldump 到 `backups/`，保留 14 天） |
+| `scripts/` | `dev-setup.ps1`（Windows 首次一键初始化并启动）、`dev-restart.ps1`（重启 API/worker/monitor/admin，端口占用自动换端口）、`db-backup.sh`（mysqldump 到 `backups/`，保留 14 天） |
 | `docker-compose.yml` | `mysql` / `redis` / `server` / `worker` / `monitor-worker` / `nginx` 编排（`env_file` 为仓库根 `.env`；三个 Python 服务共用 `build: ./server` 镜像、不同 `command`） |
-| `package.json` / `pnpm-workspace.yaml` / `pnpm-lock.yaml` | 根脚本 `dev:server` / `dev:worker` / `dev:monitor` / `dev:admin` / `dev:restart` / `build` / `build:admin` / `build:shared` / `smoke:api`；workspace `apps/*`、`packages/*`；`pnpm-lock.yaml` 为仓库根提交的锁文件（首次 `pnpm install` 生成后提交），本地开发用 `pnpm install`，生产/镜像构建用 `pnpm install --frozen-lockfile` |
+| `package.json` / `pnpm-workspace.yaml` / `pnpm-lock.yaml` | 根脚本 `dev:server` / `dev:worker` / `dev:monitor` / `dev:admin` / `dev:setup` / `dev:restart` / `build` / `build:admin` / `build:shared` / `smoke:api`；workspace `apps/*`、`packages/*`；`pnpm-lock.yaml` 为仓库根提交的锁文件（首次 `pnpm install` 生成后提交），本地开发用 `pnpm install`，生产/镜像构建用 `pnpm install --frozen-lockfile` |
 | `.env.example` | 仓库根环境变量模板（compose 读取根 `.env`），完整清单与说明见 [05-deployment](./05-deployment.md) |
 
 ## 运行进程与端口

@@ -19,6 +19,7 @@ aicreat/
 ├── nginx/
 │   └── nginx.conf             # /api/ 与 /media/ → server:8000；/admin/ → admin dist；/ → 302 /admin/
 ├── scripts/
+│   ├── dev-setup.ps1          # Windows 首次一键初始化（.env、MySQL / Redis、venv、迁移与 seed、前端依赖），最后调用 dev-restart.ps1
 │   ├── dev-restart.ps1        # 重启 API / worker / monitor / admin，端口占用自动换端口
 │   └── db-backup.sh           # mysqldump 到 backups/，保留 14 天
 ├── docker-compose.yml         # mysql / redis / server / worker / monitor-worker / nginx
@@ -55,6 +56,7 @@ aicreat/
 | `dev:worker` | `cd server && .venv\Scripts\python.exe -m app.worker` |
 | `dev:monitor` | `cd server && .venv\Scripts\python.exe -m app.monitor_worker` |
 | `dev:admin` | `pnpm --filter admin dev` |
+| `dev:setup` | `powershell -ExecutionPolicy Bypass -File scripts/dev-setup.ps1` |
 | `dev:restart` | `powershell -ExecutionPolicy Bypass -File scripts/dev-restart.ps1` |
 | `build:admin` | `pnpm --filter admin build` |
 | `build:shared` | `pnpm --filter @aicreat/shared build` |
@@ -843,6 +845,7 @@ export const BUSINESS_CODES = {
 | `nginx/nginx.conf` | `/api/` → `server:8000`；`/media/` → `server:8000`；`/admin/` → `apps/admin/dist`（history 回退到 `/admin/index.html`）；`/` → `302 /admin/` | [05-deployment](./05-deployment.md) |
 | `docker-compose.yml` | 服务 `mysql` / `redis` / `server` / `worker` / `monitor-worker` / `nginx`；`env_file: .env`（仓库根）；三个 Python 服务共用 `build: ./server`、不同 `command`（gunicorn / `python -m app.worker` / `python -m app.monitor_worker`），相同的 `environment:` 覆盖 `DATABASE_URL=mysql+pymysql://${MYSQL_USER}:${MYSQL_PASSWORD}@mysql:3306/${MYSQL_DATABASE}`、`REDIS_URL=redis://redis:6379/0`、`LOCAL_STORAGE_DIR=storage`，共享卷 `media_data:/app/storage`；mysql / redis healthcheck，三个 Python 服务 `depends_on` 二者 `service_healthy` 且 `restart: unless-stopped`；server healthcheck `curl -f http://127.0.0.1:8000/api/v1/health`；nginx 挂载 `./nginx/nginx.conf` 与宿主机构建产物 `./apps/admin/dist`（`pnpm install --frozen-lockfile && pnpm build:shared && pnpm build:admin`），`depends_on: server`；发布流程固定为 `docker compose run --rm server sh -c "alembic upgrade head && python seeds/seed.py"` → `docker compose up -d` | [05-deployment](./05-deployment.md) |
 | `.env.example` | 根 `.env` 模板；`server/.env.example` 为其副本；本机开发把副本复制为 `server/.env` | [05-deployment](./05-deployment.md)、[06-getting-started](./06-getting-started.md) |
+| `scripts/dev-setup.ps1` | Windows 首次一键初始化：检查 Python 3.11+ / Node.js 18+ / pnpm / Docker；复制根 `.env` 与 `server/.env`（已存在不动）；`docker compose up -d mysql redis` 并等待 healthy（`-SkipDocker` 用本机服务）；创建 `server/.venv` 并 `pip install -e ".[dev]"`；`alembic upgrade head` 与 `seeds/seed.py`；`pnpm install` 与 `pnpm build:shared`；提示 `ZHIQI_API_KEY` 是否已填；最后调用 `dev-restart.ps1`（`-NoStart` 跳过）。全部步骤幂等 | [06-getting-started](./06-getting-started.md) |
 | `scripts/dev-restart.ps1` | 结束本脚本先前启动的 API / worker / monitor / admin 进程后重启 `dev:server` / `dev:worker` / `dev:monitor` / `dev:admin`；8100 / 5174 仍被其它进程占用时自动换端口并打印实际端口 | [06-getting-started](./06-getting-started.md) |
 | `scripts/db-backup.sh` | `mysqldump` 到 `backups/`，保留 14 天 | [05-deployment](./05-deployment.md) |
 | `server/Dockerfile` | Python 3.11 基础镜像，复制源码后 `pip install -e .`（`app` 可导入，容器内 `python seeds/seed.py` 依赖于此），默认 `command` 为 gunicorn；worker 容器以 `python -m app.worker` / `python -m app.monitor_worker` 覆盖 | [05-deployment](./05-deployment.md) |

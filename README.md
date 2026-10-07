@@ -152,7 +152,7 @@ aicreat/
 │                                          admins、admin-groups、admin-operation-logs
 ├── packages/shared/                       @aicreat/shared：types.ts / enums.ts / constants.ts
 ├── nginx/nginx.conf                       /api/ → server:8000；/media/ → server:8000；/admin/ → admin dist；/ → 302 /admin/
-├── scripts/                               dev-restart.ps1（重启四个开发进程）、db-backup.sh（mysqldump，保留 14 天）
+├── scripts/                               dev-setup.ps1（Windows 首次一键初始化并启动）、dev-restart.ps1（重启四个开发进程）、db-backup.sh（mysqldump，保留 14 天）
 ├── docker-compose.yml                     mysql / redis / server / worker / monitor-worker / nginx
 ├── pnpm-lock.yaml                         pnpm 锁文件（首次 pnpm install 生成后提交入库；镜像 / 生产构建用 pnpm install --frozen-lockfile）
 ├── pnpm-workspace.yaml · package.json · .env.example · .gitignore
@@ -173,6 +173,8 @@ aicreat/
 | MySQL | 8.x（utf8mb4） |
 | Redis | 7.x |
 | Docker / Docker Compose | 可选（用于启动 MySQL / Redis 或整体部署） |
+
+**Windows 一键初始化并启动**：装好 Python 3.11+、Node.js、pnpm 与 Docker Desktop（启动中）后，在仓库根执行 `pnpm dev:setup`（没有 pnpm 时用 `powershell -ExecutionPolicy Bypass -File scripts/dev-setup.ps1`）。脚本依次完成下面第 1～4 步：复制两份 `.env`（已存在则不动）、`docker compose up -d mysql redis` 并等待 healthy、创建 `server/.venv` 并安装依赖、`alembic upgrade head` 与 seed、`pnpm install` 与 `pnpm build:shared`，最后调用 `pnpm dev:restart` 启动四个进程；可重复执行。已装本机 MySQL / Redis 时加 `-SkipDocker`。`ZHIQI_API_KEY` 自行填入 `server/.env`（为空即 Mock 模式），填好后执行 `pnpm dev:restart` 生效（见下文「接入真实 zhiqiapi」）。macOS / Linux 按下面各步手动执行。
 
 ### 1. 依赖服务
 
@@ -258,6 +260,7 @@ Vite 把 `/api`、`/media` 代理到 `http://127.0.0.1:8100`；登录页先调�
 | `dev:worker` | `cd server && .venv\Scripts\python.exe -m app.worker` |
 | `dev:monitor` | `cd server && .venv\Scripts\python.exe -m app.monitor_worker` |
 | `dev:admin` | `pnpm --filter admin dev` |
+| `dev:setup` | `powershell -ExecutionPolicy Bypass -File scripts/dev-setup.ps1`（Windows 首次一键初始化：`.env`、MySQL / Redis（Docker）、venv 与依赖、迁移与 seed、前端依赖与共享包，最后调用 `dev:restart`；`-SkipDocker` 用本机服务） |
 | `dev:restart` | `powershell -ExecutionPolicy Bypass -File scripts/dev-restart.ps1`（重启 API / worker / monitor / admin，端口占用自动换端口） |
 | `build:admin` | `pnpm --filter admin build` |
 | `build:shared` | `pnpm --filter @aicreat/shared build` |

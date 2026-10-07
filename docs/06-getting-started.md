@@ -223,6 +223,15 @@ pnpm --filter admin dev        # 等价 pnpm dev:admin
 
 ### 一键启动 / 重启（Windows）
 
+首次在 Windows 开发机上跑起来，可以用 `pnpm dev:setup`（= `powershell -ExecutionPolicy Bypass -File scripts/dev-setup.ps1`；尚未安装 pnpm 时直接运行后者）代替第一～四节的手工步骤：
+
+```powershell
+pnpm dev:setup                # 首次初始化并启动；可重复执行
+pnpm dev:setup -SkipDocker    # 使用本机已装的 MySQL / Redis（库与账号按第一节建好）；不要写成 -- -SkipDocker
+```
+
+`scripts/dev-setup.ps1` 依次：检查 Python 3.11+、Node.js 18+、pnpm 与 Docker（Docker Desktop 须已启动）→ 根 `.env`、`server/.env` 不存在时从模板复制（已存在则不改动）→ `docker compose up -d mysql redis` 并等待两者 healthy → `server/.venv` 不存在时用 Python 3.11+ 创建，`pip install -e ".[dev]"` → `alembic upgrade head`（连接失败重试 3 次）与 `python seeds/seed.py` → `pnpm install` 与 `pnpm build:shared` → 读取 `server/.env` 的 `ZHIQI_API_KEY`（为空提示 Mock 模式；已填写时列出为空的 `ZHIQI_*_DEFAULT_MODEL`，Key 本身不打印）→ 调用 `scripts/dev-restart.ps1` 启动并健康检查（`-NoStart` 跳过）。每一步都幂等，重复执行不会产生重复数据。`ZHIQI_API_KEY` 由使用者自行填入 `server/.env`，填好后执行 `pnpm dev:restart` 生效（见「六、接入真实 zhiqiapi」）。
+
 首次运行 `pnpm dev:restart` 前，先完成第一、二节（根 `.env` 与 `server/.env`、MySQL / Redis、venv、迁移与 seed），并在仓库根执行过 `pnpm install` 与 `pnpm build:shared`：脚本只负责启动进程，不构建共享包，缺少 `packages/shared/dist/` 时它启动的 Vite 同样无法加载后台。
 
 ```powershell
@@ -862,6 +871,7 @@ POST /admin/ai/routes/3/test
 | `pnpm dev:worker` | `cd server && .venv\Scripts\python.exe -m app.worker` | 启动 AI 任务进程 |
 | `pnpm dev:monitor` | `cd server && .venv\Scripts\python.exe -m app.monitor_worker` | 启动监控进程 |
 | `pnpm dev:admin` | `pnpm --filter admin dev` | 启动管理后台（5174，访问 `http://localhost:5174/admin/`；首次运行前先 `pnpm build:shared`） |
+| `pnpm dev:setup` | `powershell -ExecutionPolicy Bypass -File scripts/dev-setup.ps1` | Windows 首次一键初始化并启动：`.env`、MySQL / Redis（Docker，`-SkipDocker` 用本机服务）、venv 与依赖、迁移与 seed、前端依赖与共享包，最后调用 `dev:restart`；可重复执行 |
 | `pnpm dev:restart` | `powershell -ExecutionPolicy Bypass -File scripts/dev-restart.ps1` | Windows 一键重启：先结束本脚本上次启动的四个进程；8100 / 5174 被其它程序占用时自动换端口并打印实际地址（首次运行前先 `pnpm build:shared`） |
 | `pnpm build:shared` / `pnpm build:admin` / `pnpm build` | `pnpm --filter @aicreat/shared build` / `pnpm --filter admin build` / `pnpm -r build` | 构建共享包（新克隆仓库或修改 `packages/shared` 后必须先执行）/ 后台 `apps/admin/dist` / 全部 |
 | `pnpm smoke:api` | `cd server && .venv\Scripts\python.exe scripts\integration_smoke.py` | Mock 端到端冒烟（需 API、`app.worker`、`app.monitor_worker` 三进程运行；连接缺省地址 `http://127.0.0.1:8100`，以 `SEED_ADMIN_USERNAME` / `SEED_ADMIN_PASSWORD` 登录；API 在其它端口或超管已改密时直接运行脚本并传 `--base-url` / `--password`） |
