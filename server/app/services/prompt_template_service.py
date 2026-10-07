@@ -671,7 +671,7 @@ def template_for_generation(
     ``project_mismatch``）；未指定时 ``resolve_template(kind, project.id, project.language)``。"""
     if template_id is None:
         return resolve_template(db, kind, project.id, project.language)
-    tpl = get_visible(db, scope, PromptTemplate, template_id, message=TEMPLATE_NOT_FOUND)
+    tpl = get_visible(db, scope, PromptTemplate, template_id)
     error = _template_ref_error(tpl, kind, project.id, list(loc), template_id)
     if error:
         raise invalid_params(error)
@@ -768,12 +768,12 @@ def list_templates(
 
 
 def get_template(db: Session, scope: DataScope, template_id: int) -> dict[str, Any]:
-    return template_item(get_visible(db, scope, PromptTemplate, template_id, message=TEMPLATE_NOT_FOUND))
+    return template_item(get_visible(db, scope, PromptTemplate, template_id))
 
 
 def list_versions(db: Session, scope: DataScope, template_id: int) -> list[dict[str, Any]]:
     """同 code 的全部可见版本（``version DESC``；他人的全局草稿不列出）。"""
-    tpl = get_visible(db, scope, PromptTemplate, template_id, message=TEMPLATE_NOT_FOUND)
+    tpl = get_visible(db, scope, PromptTemplate, template_id)
     stmt = scope_templates(select(PromptTemplate), scope).where(PromptTemplate.code == tpl.code)
     rows = db.scalars(stmt.order_by(PromptTemplate.version.desc())).all()
     return [template_item(r) for r in rows]
@@ -905,7 +905,7 @@ def update_template(db: Session, scope: DataScope, template_id: int, values: Map
     """``PUT /admin/prompt-templates/{id}``：``draft`` 原地修改；``published`` 不原地修改，复制为同 code 新 ``draft``
     （``version = MAX(version)+1``，``created_by`` 为本人）并返回新对象（``id`` 不同）；``archived`` → 409 ``current_status``。
     ``code`` / ``kind`` 创建后不可修改。"""
-    tpl = get_visible(db, scope, PromptTemplate, template_id, message=TEMPLATE_NOT_FOUND)
+    tpl = get_visible(db, scope, PromptTemplate, template_id)
     if tpl.status == "archived":
         raise _conflict("已归档的模板不可修改", {"current_status": tpl.status})
     if "variables" in values:
@@ -973,7 +973,7 @@ def publish_errors(tpl: PromptTemplate) -> list[dict[str, Any]]:
 def publish_template(db: Session, scope: DataScope, template_id: int, *, admin_id: int) -> dict[str, Any]:
     """``draft → published``；同 code 旧 ``published → archived``（同一事务，保证同 code 只有一个 ``published``）。
     同 code 存在系统版本时新发布版本继承 ``is_system=1``（见模块说明）。"""
-    tpl = get_visible(db, scope, PromptTemplate, template_id, message=TEMPLATE_NOT_FOUND)
+    tpl = get_visible(db, scope, PromptTemplate, template_id)
     if tpl.status != "draft":
         raise _conflict("只有草稿可以发布", {"current_status": tpl.status})
     errors = publish_errors(tpl)
@@ -999,7 +999,7 @@ def publish_template(db: Session, scope: DataScope, template_id: int, *, admin_i
 def archive_template(db: Session, scope: DataScope, template_id: int, *, admin_id: int) -> dict[str, Any]:
     """``published → archived``；同 code 无其它 ``published`` 且（系统模板或该 code 任一版本被项目 ``default_templates``
     引用）→ 409 ``{"current_status":"published","reason":"last_published"}``。"""
-    tpl = get_visible(db, scope, PromptTemplate, template_id, message=TEMPLATE_NOT_FOUND)
+    tpl = get_visible(db, scope, PromptTemplate, template_id)
     if tpl.status != "published":
         raise _conflict("只有已发布的模板可以归档", {"current_status": tpl.status})
     other_published = db.scalar(
@@ -1020,7 +1020,7 @@ def archive_template(db: Session, scope: DataScope, template_id: int, *, admin_i
 def duplicate_template(db: Session, scope: DataScope, template_id: int, values: Mapping[str, Any], *, admin_id: int) -> dict[str, Any]:
     """``POST /{id}/duplicate``：``{code, name, project_id?}`` 复制为新 code 的 ``draft``（``version=1``、非系统）；
     ``project_id`` 缺省沿用源模板（从系统模板派生项目模板时指定，须为 ``0`` 或可见项目）。"""
-    source = get_visible(db, scope, PromptTemplate, template_id, message=TEMPLATE_NOT_FOUND)
+    source = get_visible(db, scope, PromptTemplate, template_id)
     code = str(values["code"]).strip()
     project_id = int(values["project_id"]) if values.get("project_id") is not None else int(source.project_id or 0)
     _check_project_ref(db, scope, project_id)
@@ -1055,7 +1055,7 @@ def duplicate_template(db: Session, scope: DataScope, template_id: int, values: 
 def preview_template(db: Session, scope: DataScope, template_id: int, variables: Mapping[str, Any] | None) -> dict[str, Any]:
     """``POST /{id}/preview``：内置变量取示例值（``SAMPLE_VARIABLES``），以请求 ``variables`` 覆盖后渲染，不调用模型；
     必填变量缺失 4221。"""
-    tpl = get_visible(db, scope, PromptTemplate, template_id, message=TEMPLATE_NOT_FOUND)
+    tpl = get_visible(db, scope, PromptTemplate, template_id)
     merged = {name: SAMPLE_VARIABLES[name] for name in builtin_variables(tpl.kind) if name in SAMPLE_VARIABLES}
     merged.update(dict(variables or {}))
     system, user = render(tpl, merged)
@@ -1064,7 +1064,7 @@ def preview_template(db: Session, scope: DataScope, template_id: int, variables:
 
 def delete_template(db: Session, scope: DataScope, template_id: int) -> None:
     """仅 ``draft`` 且非系统模板可物理删除，否则 409（``draft`` 不会被项目默认引用，无需清理）。"""
-    tpl = get_visible(db, scope, PromptTemplate, template_id, message=TEMPLATE_NOT_FOUND)
+    tpl = get_visible(db, scope, PromptTemplate, template_id)
     if tpl.status != "draft":
         raise _conflict("只有草稿可以删除", {"current_status": tpl.status})
     if tpl.is_system:

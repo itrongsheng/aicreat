@@ -283,6 +283,9 @@ onMounted(() => {
   filters.content_id = qInt("content_id");
   filters.platform_id = qInt("platform_id");
   filters.alive_status = qEnum("alive_status", LINK_ALIVE_STATUS);
+  // 控制台 KPI 卡跳转（docs/12 §5.3）：?seo_indexed_any=0 / ?geo_cited_any=0
+  filters.seo_indexed_any = qEnum("seo_indexed_any", ["1", "0"] as const);
+  filters.geo_cited_any = qEnum("geo_cited_any", ["1", "0"] as const);
   if (!projectStore.projectsLoaded && !projectStore.loadingProjects) projectStore.load().catch(() => undefined);
   void loadPlatforms();
   void engineCatalog.load();

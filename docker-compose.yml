@@ -1,0 +1,98 @@
+# aicreat 生产 / 预发编排（docs/05-deployment.md §3）
+# 读取仓库根 .env：既作三个应用容器的 env_file，也作变量插值（${MYSQL_*}、${GUNICORN_WORKERS}、${NGINX_HTTP_PORT}）。
+# 发布：docker compose build server → docker compose run --rm server sh -c "alembic upgrade head && python seeds/seed.py"
+#       → docker compose up -d（完整步骤见 docs/05 §7）
+
+x-app-env: &app-env                    # §2.1「compose 覆盖」行：三个应用容器相同
+  DATABASE_URL: mysql+pymysql://${MYSQL_USER}:${MYSQL_PASSWORD}@mysql:3306/${MYSQL_DATABASE}
+  REDIS_URL: redis://redis:6379/0
+  LOCAL_STORAGE_DIR: storage
+
+x-app-base: &app-base
+  build: ./server
+  image: aicreat-server                # 三个应用服务同名镜像：只构建一次，worker / monitor-worker 直接复用
+  env_file: .env
+  environment: *app-env
+  restart: unless-stopped
+  depends_on:
+    mysql: { condition: service_healthy }
+    redis: { condition: service_healthy }
+  volumes:
+    - media_data:/app/storage
+  logging:
+    driver: json-file
+    options: { max-size: "50m", max-file: "5" }
+
+services:
+  mysql:
+    image: mysql:8
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    ports:
+      - "127.0.0.1:3306:3306"          # 只绑回环地址：本机开发直连；生产主机外部不可达
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -p$$MYSQL_ROOT_PASSWORD"]   # $$ 交给容器内 shell 展开
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7
+    command: redis-server --appendonly yes --maxmemory-policy noeviction
+    ports:
+      - "127.0.0.1:6379:6379"          # 同上，只绑回环地址
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  server:
+    <<: *app-base
+    command: gunicorn -k uvicorn.workers.UvicornWorker app.main:app -b 0.0.0.0:8000 -w ${GUNICORN_WORKERS:-2} --timeout 120
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8000/api/v1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+
+  worker:
+    <<: *app-base
+    command: python -m app.worker        # AI 任务 / 轮询 / 转存 / 对账 / 模型同步 / 健康探测 / 回收 / 清理
+    stop_grace_period: 90s               # 给在飞的提交 / 转存留出收尾时间；超时未完成的任务由 recover_stale_tasks 回收
+
+  monitor-worker:
+    <<: *app-base
+    command: python -m app.monitor_worker   # 删除检测 / 收录检测 / daily_stats / 告警评估
+    stop_grace_period: 60s
+    # 启用 google_search_console 时只读挂载服务账号 JSON（<<: *app-base 不合并列表，须连同 media_data 一并列出，docs/05 §3.2）：
+    # volumes:
+    #   - media_data:/app/storage
+    #   - ./secrets/gsc.json:/run/secrets/gsc.json:ro
+
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "${NGINX_HTTP_PORT:-80}:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./apps/admin/dist:/usr/share/nginx/admin:ro
+    depends_on:
+      - server
+    restart: unless-stopped
+
+volumes:
+  mysql_data:
+  redis_data:
+  media_data:

@@ -707,7 +707,7 @@ const tabs: StatusTab[] = ["all", "candidate", "adopted", "discarded"];
         </el-table-column>
         <el-table-column :label="t('keywords.titleCount')" width="80" align="right">
           <template #default="{ row }">
-            <el-link v-if="row.title_count" type="primary" :underline="false" @click="gotoTitles(row)">{{ row.title_count }}</el-link>
+            <el-link v-if="row.title_count" type="primary" underline="never" @click="gotoTitles(row)">{{ row.title_count }}</el-link>
             <span v-else>0</span>
           </template>
         </el-table-column>
@@ -891,7 +891,7 @@ const tabs: StatusTab[] = ["all", "candidate", "adopted", "discarded"];
           </el-upload>
           <div class="form-hint">
             {{ t("keywords.import.csvHint", { max: KEYWORD_IMPORT_MAX }) }}
-            <el-link type="primary" :underline="false" @click="downloadTemplate">{{ t("keywords.import.template") }}</el-link>
+            <el-link type="primary" underline="never" @click="downloadTemplate">{{ t("keywords.import.template") }}</el-link>
           </div>
         </el-tab-pane>
       </el-tabs>

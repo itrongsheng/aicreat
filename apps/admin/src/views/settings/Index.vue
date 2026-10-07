@@ -1,7 +1,8 @@
 <script setup lang="ts">
 // 系统配置（docs/04 §6.6、§7.18；docs/11 §11.5）：按配置键分 Tab。system_info 按语言分别维护表单；
 // 专用表单（默认，可切换为 JSON）：ai_routing_config → AiRoutingForm.vue（docs/08 §4.2）、monitoring_config → MonitoringConfigForm.vue、
-// geo_engines → GeoEnginesForm.vue、seo_providers → SeoProvidersForm.vue、alert_config → AlertConfigForm.vue（docs/11 §13.1、§8.1、§7.6、§10.3）；
+// geo_engines → GeoEnginesForm.vue、seo_providers → SeoProvidersForm.vue、alert_config → AlertConfigForm.vue（docs/11 §13.1、§8.1、§7.6、§10.3）、
+// stats_config → StatsConfigForm.vue（docs/12 §4.8；修改时区后提示历史统计需按新时区重算）；
 // 其它键以 JsonEditor 编辑。保存 PUT /admin/settings/{key}，后端 400 校验错误按 loc 回显到表单字段（JSON 模式逐项列出）；
 // 监控相关四个键保存成功后提示「下一轮调度生效」，并清空引擎目录缓存（useIndexEngines）。
 import { computed, onMounted, reactive, ref, watch } from "vue";
@@ -14,6 +15,7 @@ import { validationErrors } from "@/api/client";
 import * as settingsApi from "@/api/settings";
 import JsonEditor from "@/components/JsonEditor.vue";
 import { invalidateIndexEngines } from "@/composables/useIndexEngines";
+import { invalidateRuntimeSettings } from "@/composables/useRuntimeSettings";
 import { usePermission } from "@/composables/usePermission";
 import { useAuthStore } from "@/store/auth";
 import AiRoutingForm from "./AiRoutingForm.vue";
@@ -21,6 +23,7 @@ import AlertConfigForm from "./AlertConfigForm.vue";
 import GeoEnginesForm from "./GeoEnginesForm.vue";
 import MonitoringConfigForm from "./MonitoringConfigForm.vue";
 import SeoProvidersForm from "./SeoProvidersForm.vue";
+import StatsConfigForm from "./StatsConfigForm.vue";
 
 type JsonKey = Exclude<settingsApi.SettingKey, "system_info">;
 type JsonValue = Record<string, unknown>;
@@ -36,7 +39,7 @@ const JSON_KEYS: JsonKey[] = [
   "stats_config",
 ];
 /** 有专用表单的键（默认表单模式，可切换为 JSON） */
-const FORM_KEYS: JsonKey[] = ["monitoring_config", "geo_engines", "seo_providers", "alert_config", "ai_routing_config"];
+const FORM_KEYS: JsonKey[] = ["monitoring_config", "geo_engines", "seo_providers", "alert_config", "ai_routing_config", "stats_config"];
 /** 监控相关键：保存后下一轮调度生效，且影响引擎目录（运行时子集） */
 const MONITORING_KEYS: JsonKey[] = ["monitoring_config", "geo_engines", "seo_providers", "alert_config"];
 /** 引用环境变量的字段：GET 时同级附加 configured: true|false，保存前剔除 */
@@ -192,9 +195,17 @@ async function saveKey(key: JsonKey) {
   state.saving = true;
   state.errors = [];
   try {
+    const previousTimezone = key === "stats_config" ? savedValue(key).timezone : undefined;
     const saved = await settingsApi.saveSetting<JsonValue>(key, stripConfigured(state.value) as JsonValue, "*", { silent: true });
     applyValue(key, saved.value);
-    if (MONITORING_KEYS.includes(key)) {
+    if (key === "stats_config") {
+      invalidateRuntimeSettings();
+      if (typeof previousTimezone === "string" && previousTimezone && saved.value.timezone !== previousTimezone) {
+        ElMessage.warning({ message: t("statsSettings.timezoneChanged"), duration: 6000 });
+      } else {
+        ElMessage.success(t("common.saved"));
+      }
+    } else if (MONITORING_KEYS.includes(key)) {
       invalidateIndexEngines();
       ElMessage.success(t("settings.savedNextRound"));
     } else {
@@ -392,6 +403,14 @@ onMounted(loadAll);
             v-model="states[key].value"
             :readonly="!canUpdate"
             :errors="states[key].errors"
+            @validity="(v: boolean) => (states[key].valid = v)"
+          />
+          <StatsConfigForm
+            v-else-if="usesForm(key) && key === 'stats_config'"
+            v-model="states[key].value"
+            :readonly="!canUpdate"
+            :errors="states[key].errors"
+            :saved="savedValue(key)"
             @validity="(v: boolean) => (states[key].valid = v)"
           />
           <JsonEditor

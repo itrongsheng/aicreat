@@ -221,7 +221,7 @@ onMounted(() => {
     <el-table v-loading="loading" :data="rows" row-key="id" stripe>
       <el-table-column :label="t('batches.id')" width="90">
         <template #default="{ row }">
-          <el-link type="primary" :underline="false" class="mono" @click="openDetail(row)">#{{ row.id }}</el-link>
+          <el-link type="primary" underline="never" class="mono" @click="openDetail(row)">#{{ row.id }}</el-link>
         </template>
       </el-table-column>
       <el-table-column :label="t('batches.kind')" width="80">

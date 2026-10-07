@@ -697,7 +697,7 @@ def list_routes(db: Session, scope: DataScope, *, project_id: int | None = None)
 
 def get_route_row(db: Session, scope: DataScope, route_id: int) -> CapabilityRoute:
     """读取路由；项目覆盖行须属于可见项目（否则与不存在相同，404）。"""
-    return get_visible(db, scope, CapabilityRoute, route_id, message="路由不存在")
+    return get_visible(db, scope, CapabilityRoute, route_id)
 
 
 def get_route(db: Session, scope: DataScope, route_id: int) -> dict[str, Any]:

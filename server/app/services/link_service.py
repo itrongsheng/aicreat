@@ -82,7 +82,6 @@ MSG_PLATFORM_NOT_FOUND = "平台不存在"
 MSG_PLATFORM_INACTIVE = "平台已停用"
 MSG_LINK_EXISTS = "链接已存在"
 MSG_OWNED_BY_OTHER = "该链接已由其他用户回填"
-MSG_LINK_NOT_FOUND = "链接不存在"
 MSG_PUBLISHED_AT_RANGE = "发布时间超出允许范围"
 
 EXPORT_COLUMNS_BASE: tuple[tuple[str, str], ...] = (
@@ -213,7 +212,10 @@ def due(engine_state: Mapping[str, Any] | None, link: Any, *, now: datetime, cfg
         return None
     schedule = [int(d) for d in cfg["schedule_days"]]
     checked_at = _parse_dt(st.get("checked_at"))
-    if checked_at is None:                                   # 从未检测：按排程轮次指针 index_check_count 取值
+    # 从未检测：按排程轮次指针 index_check_count 取值。「从未检测」以 scheduled 次数 check_count 判定：manual 检测与人工标记
+    # 也会写 checked_at，但不推进排程（§7.5「手动 / 人工标记」行、§17 第 5 条「手动检测不打乱排程」），否则晚回填链接在首个
+    # scheduled 轮次执行前做一次手动检测，就会被 checked_at + monthly_interval_days 推迟一个月而错过本应立即执行的轮次。
+    if checked_at is None or int(st.get("check_count", 0) or 0) == 0:
         i = int(link.index_check_count or 0)
         return link.published_at + timedelta(days=schedule[i]) if i < len(schedule) else now
     if st.get("status") in ("indexed", "cited"):
@@ -431,7 +433,7 @@ def recompute_first_published_at(db: Session, content: Content) -> None:
 def _insert_link(db: Session, scope: DataScope, body: LinkCreate, admin_id: int) -> tuple[PublishLink, Content, bool]:
     """校验（§4.1 第 1~7 步）+ 同事务写入（§4.4 第 1~3 步），不提交。返回 ``(link, content, 是否由 approved 转为 published)``。"""
     now = utcnow()
-    content = get_visible(db, scope, Content, body.content_id, message=MSG_CONTENT_NOT_FOUND)          # 1
+    content = get_visible(db, scope, Content, body.content_id)          # 1
     if content.status not in ("approved", "published"):
         raise _conflict(MSG_CONTENT_NOT_APPROVED, {"current_status": content.status})
     project = db.get(Project, content.project_id)                                                    # 2
@@ -581,7 +583,7 @@ def batch_backfill(db: Session, scope: DataScope, items: Sequence[Mapping[str, A
 
 
 def get_link_row(db: Session, scope: DataScope, link_id: int) -> PublishLink:
-    return get_visible(db, scope, PublishLink, link_id, message=MSG_LINK_NOT_FOUND)
+    return get_visible(db, scope, PublishLink, link_id)
 
 
 def get_link(db: Session, scope: DataScope, link_id: int) -> dict[str, Any]:

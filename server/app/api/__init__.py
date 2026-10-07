@@ -27,6 +27,7 @@ from app.api.admin import (
     projects,
     prompt_templates,
     settings,
+    stats,
     titles,
     uploads,
 )
@@ -54,6 +55,7 @@ admin.include_router(platforms.router, prefix="/platforms", tags=["publish"])
 admin.include_router(links.router, prefix="/links", tags=["publish"])
 admin.include_router(monitoring.router, prefix="/monitoring", tags=["monitoring"])
 admin.include_router(alerts.router, prefix="/alerts", tags=["monitoring"])
+admin.include_router(stats.router, prefix="/stats", tags=["stats"])
 # AI 网关：/ai/models、/ai/tasks、/ai/usage 先于 /ai（ai_routes 的 /routes…、/health…）挂载
 admin.include_router(ai_models.router, prefix="/ai/models", tags=["ai"])
 admin.include_router(ai_tasks.router, prefix="/ai/tasks", tags=["ai"])

@@ -459,6 +459,9 @@ def test_due_and_compute_next_index_check_at() -> None:
     assert link_service.due(None, link, now=now, cfg=INDEX_CFG) == published + timedelta(days=14)
     late = _link_ns(published_at=now - timedelta(days=400), index_check_count=5)
     assert link_service.due(None, late, now=now, cfg=INDEX_CFG) == now                               # 轮次越界 → now
+    manual_only = {"status": "indexed", "checked_at": (now - timedelta(minutes=5)).isoformat() + "Z", "check_count": 0}
+    assert link_service.due(manual_only, late, now=now, cfg=INDEX_CFG) == now        # 只有 manual 检测：仍按排程指针
+    assert link_service.due(manual_only, link, now=now, cfg=INDEX_CFG) == published + timedelta(days=14)
     checked = published + timedelta(days=3, hours=1)
     iso = checked.isoformat() + "Z"
     assert link_service.due({"status": "indexed", "checked_at": iso, "check_count": 2}, link, now=now, cfg=INDEX_CFG) == \

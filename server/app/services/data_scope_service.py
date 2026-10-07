@@ -276,17 +276,19 @@ def _id_in_range(obj_id: Any) -> bool:
     return not isinstance(obj_id, int) or -MAX_BIGINT - 1 <= obj_id <= MAX_BIGINT
 
 
-def get_visible(db: Session, scope: DataScope, model: type[T], obj_id: Any, *, message: str = NOT_FOUND_MESSAGE) -> T:
-    """读取对象并判断可见性；不存在或不可见都抛 ``BusinessError("对象不存在", code=404, http_status=404)``。"""
+def get_visible(db: Session, scope: DataScope, model: type[T], obj_id: Any) -> T:
+    """读取对象并判断可见性；不存在或不可见都抛 ``BusinessError("对象不存在", code=404, http_status=404)``。
+
+    文案统一为「对象不存在」（docs/13 §9.1、docs/06 第 15 步），不按资源区分，响应与对象真不存在时完全相同。"""
     obj = db.get(model, obj_id) if obj_id is not None and _id_in_range(obj_id) else None
     if obj is None or not is_visible(db, scope, obj):
-        raise BusinessError(message, code=CODE_NOT_FOUND, http_status=404)
+        raise BusinessError(NOT_FOUND_MESSAGE, code=CODE_NOT_FOUND, http_status=404)
     return obj
 
 
 def require_project(db: Session, scope: DataScope, project_id: int, *, active: bool = False) -> Project:
     """写入口：项目须可见（否则 404）；``active=True`` 时 ``archived`` 项目返回 409 ``current_status``。"""
-    project = get_visible(db, scope, Project, project_id, message="项目不存在")
+    project = get_visible(db, scope, Project, project_id)
     if active and project.status != "active":
         raise BusinessError("项目已归档", code=CODE_CONFLICT, http_status=409, data={"current_status": project.status})
     return project

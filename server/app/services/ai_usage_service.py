@@ -2,7 +2,8 @@
 
 ``reconcile(db)``：持 ``lock:worker:reconcile`` 拉取 ``GET /api/log/token``（最近 1000 条，新在前）→ 逐条
 ``entry_hash = SHA-256(按键排序、无空白的规范化 raw_json)`` 幂等入库 ``ai_usage_logs`` → 本轮新插入条目按
-``request_id ↔ ai_tasks.request_id``（近 7 天尝试行）、失败则 ``task_id ↔ upstream_task_id`` 匹配 → 回填
+``request_id ↔ ai_tasks.request_id``（近 7 天尝试行）、失败则 ``task_id ↔ upstream_task_id`` 匹配（近 7 天入库的历史未匹配条目
+一并重试，见 ``_reconcile_locked`` ②）→ 回填
 ``quota_actual = max(0, Σ type2 − Σ|type6|)`` / ``reconciled_at`` / ``usage_log_type`` / ``cost_cny`` 并重算根任务合计列 →
 涉及的历史日期重聚合 → 清理过期未匹配条目 → ``SET ai:usage:last_pull``。对账不回写 ``quota:daily`` / ``stats:rt``。
 """
@@ -53,6 +54,7 @@ LAST_PULL_KEY = "ai:usage:last_pull"
 LAST_PULL_TTL = 86400
 UPSTREAM_WINDOW = 1000
 MATCH_WINDOW_DAYS = 7
+RETRY_UNMATCHED_LIMIT = 5000      # 每轮重试的历史未匹配条目上限（最近入库者优先）
 LOG_TYPE_CONSUME = 2
 LOG_TYPE_FAILED = 5
 LOG_TYPE_REFUND = 6
@@ -222,8 +224,28 @@ def _reconcile_locked(db: Session) -> dict[str, Any]:
 
     # ---- ② 匹配（近 7 天尝试行：request_id → upstream_task_id）
     since = now - timedelta(days=MATCH_WINDOW_DAYS)
-    request_ids = {row.request_id for _, row in new_rows if row.request_id}
-    task_ids = {row.upstream_task_id for _, row in new_rows if row.upstream_task_id}
+    # 先前轮次入库但未匹配的条目（近 7 天、可匹配键非空）与本轮新条目一起重试：上游日志可能先于本地尝试行提交出现
+    # （worker 收到响应到写库之间被周期对账拉到），只匹配新条目会让该行永久未对账。未匹配条目从未计入任何尝试行，
+    # 重试不会重复累加；已对账行仍只接受新的 type=6 退款条目（下方规则不变）。
+    positions = {digest: position for digest, (position, _) in unique.items()}
+    new_log_ids = {row.id for _, row in new_rows}
+    previous_unmatched = db.scalars(
+        select(AiUsageLog)
+        .where(
+            AiUsageLog.ai_task_id.is_(None),
+            AiUsageLog.pulled_at >= since,
+            or_(AiUsageLog.request_id.is_not(None), AiUsageLog.upstream_task_id.is_not(None)),
+        )
+        .order_by(AiUsageLog.id.desc())
+        .limit(RETRY_UNMATCHED_LIMIT + len(new_log_ids))
+    ).all()
+    retry_rows: list[tuple[int, AiUsageLog]] = [
+        (positions.get(row.entry_hash, len(entries) + offset), row)
+        for offset, row in enumerate(r for r in previous_unmatched if r.id not in new_log_ids)
+    ][:RETRY_UNMATCHED_LIMIT]
+    match_rows = new_rows + retry_rows
+    request_ids = {row.request_id for _, row in match_rows if row.request_id}
+    task_ids = {row.upstream_task_id for _, row in match_rows if row.upstream_task_id}
     by_request: dict[str, AiTask] = {}
     by_upstream: dict[str, AiTask] = {}
     if request_ids or task_ids:
@@ -245,7 +267,7 @@ def _reconcile_locked(db: Session) -> dict[str, Any]:
 
     grouped: dict[int, list[tuple[int, AiUsageLog]]] = defaultdict(list)
     tasks: dict[int, AiTask] = {}
-    for position, row in new_rows:
+    for position, row in match_rows:
         task = by_request.get(row.request_id) if row.request_id else None
         if task is None and row.upstream_task_id:
             task = by_upstream.get(row.upstream_task_id)
@@ -254,6 +276,8 @@ def _reconcile_locked(db: Session) -> dict[str, Any]:
             tasks[task.id] = task
 
     matched = 0
+    rematched = 0
+    new_ids = {id(row) for _, row in new_rows}
     touched_roots: set[int] = set()
     stat_dates: set[date] = set()
     for task_id, logs in grouped.items():
@@ -275,7 +299,9 @@ def _reconcile_locked(db: Session) -> dict[str, Any]:
             row.matched_at = now
             if not row.model_name:
                 row.model_name = task.model[:120] if task.model else None
-        matched += len(accepted)
+        fresh = sum(1 for _, row in accepted if id(row) in new_ids)
+        matched += fresh
+        rematched += len(accepted) - fresh
         if not reconcile_now:
             continue
         db.flush()
@@ -331,7 +357,7 @@ def _reconcile_locked(db: Session) -> dict[str, Any]:
         "request_ids": [request_id] if request_id else [],
     }
     cache_set_json(LAST_PULL_KEY, {"pulled_at": iso_utc(now), **result}, LAST_PULL_TTL)
-    logger.info("用量对账完成 %s cleaned_unmatched=%s", result, cleaned)
+    logger.info("用量对账完成 %s rematched=%s cleaned_unmatched=%s", result, rematched, cleaned)
     _trigger_aggregates(stat_dates, stats_service.today_date(tz=tz))
     return result
 

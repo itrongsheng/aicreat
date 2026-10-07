@@ -661,6 +661,24 @@ def test_manual_run_does_not_touch_schedule(db: Session, setup_a: dict[str, Any]
     assert all(s["check_count"] == 0 for s in states(link, "seo").values())
 
 
+def test_manual_check_before_first_scheduled_round_keeps_late_backfill_due(db: Session, env: dict[str, Any],
+                                                                         setup_a: dict[str, Any], never_hit: None) -> None:
+    """晚回填（主计划已用尽）的链接在首个 scheduled 轮次前先做手动检测：手动写入的 ``checked_at`` 不推迟排程，
+    下一次扫描仍对全部引擎执行 scheduled 轮次（docs/06 第 10~11 步、docs/11 §7.5「手动 / 人工标记」、§17 第 5 条）。"""
+    link = make_link(db, setup_a["content"], env["platforms"]["zhihu"], "https://zhuanlan.zhihu.com/p/3131", days_ago=35)
+    link.next_index_check_at = utcnow() - timedelta(seconds=5)          # 回填时 due=now
+    db.commit()
+    run_link(db, link, check_type="manual", triggered_by=1)
+    db.expire_all()
+    link = db.get(PublishLink, link.id)
+    assert all(s["check_count"] == 0 and s["checked_at"] for s in states(link, "seo").values())
+    assert link.next_index_check_at <= utcnow()                          # 手动不重算
+    assert schedule_index_checks.enqueue_due() == 1
+    payload = [p for p in queue_items() if p["link_id"] == link.id][0]
+    assert payload["check_type"] == "scheduled"
+    assert payload["engines"] == [*SEO_MOCK_ENGINES, *GEO_MOCK_ENGINES]
+
+
 def test_run_skips_when_paused_and_respects_deleted(db: Session, setup_a: dict[str, Any]) -> None:
     link = setup_a["link"]
     redis_client.set("ai:paused:quota_exceeded", "x", ex=600)

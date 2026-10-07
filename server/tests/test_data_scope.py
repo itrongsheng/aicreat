@@ -485,9 +485,24 @@ def test_scoped_routes_declare_data_scope(app: FastAPI) -> None:
     from app.main import iter_api_routes
 
     scoped = 0
+    covered: set[str] = set()
     for path, _methods, route in iter_api_routes(app):
         relative = path[len("/api/v1"):] if path.startswith("/api/v1/") else path
-        if any(relative == p or relative.startswith(p + "/") for p in ds.SCOPED_ROUTE_PREFIXES):
+        matched = [p for p in ds.SCOPED_ROUTE_PREFIXES if relative == p or relative.startswith(p + "/")]
+        if matched:
             assert _depends_on(route, get_data_scope), path
+            covered.update(matched)
             scoped += 1
-    assert scoped >= 2                     # 当前已挂载：/admin/projects/owner-options、/admin/admin-operation-logs
+    # 每个受范围约束的前缀都已挂载路由（docs/13 §9.3 的 17 个路由文件全部落地），且没有漏登记的前缀
+    assert covered == set(ds.SCOPED_ROUTE_PREFIXES), sorted(set(ds.SCOPED_ROUTE_PREFIXES) - covered)
+    assert scoped >= 100
+
+
+def test_scoped_route_prefixes_match_docs() -> None:
+    """``SCOPED_ROUTE_PREFIXES`` 与 docs/04 §6.0、docs/13 §9.3 列出的 17 个前缀一致。"""
+    assert ds.SCOPED_ROUTE_PREFIXES == (
+        "/admin/projects", "/admin/prompt-templates", "/admin/keywords", "/admin/titles", "/admin/contents",
+        "/admin/generation-batches", "/admin/media", "/admin/uploads", "/admin/ai/routes", "/admin/ai/tasks",
+        "/admin/ai/usage", "/admin/platforms", "/admin/links", "/admin/monitoring", "/admin/alerts", "/admin/stats",
+        "/admin/admin-operation-logs",
+    )

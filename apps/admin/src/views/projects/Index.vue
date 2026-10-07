@@ -420,7 +420,7 @@ onMounted(async () => {
       <el-table-column prop="id" :label="t('common.id')" width="70" />
       <el-table-column :label="t('projects.name')" min-width="180">
         <template #default="{ row }">
-          <el-link type="primary" :underline="false" @click="gotoDetail(row)">{{ row.name }}</el-link>
+          <el-link type="primary" underline="never" @click="gotoDetail(row)">{{ row.name }}</el-link>
           <div class="text-secondary mono">{{ row.slug }}</div>
         </template>
       </el-table-column>

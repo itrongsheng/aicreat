@@ -330,7 +330,7 @@ def export_keywords(
 
 
 def get_keyword_row(db: Session, scope: DataScope, keyword_id: int) -> Keyword:
-    return get_visible(db, scope, Keyword, keyword_id, message=KEYWORD_NOT_FOUND)
+    return get_visible(db, scope, Keyword, keyword_id)
 
 
 def get_keyword(db: Session, scope: DataScope, keyword_id: int) -> dict[str, Any]:

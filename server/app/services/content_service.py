@@ -1327,7 +1327,7 @@ def task_summary(root: AiTask) -> dict[str, Any]:
 
 def get_content_row(db: Session, scope: DataScope, content_id: int) -> Content:
     """可见内容（按所属项目判断，不可见与不存在一律 404）。"""
-    return get_visible(db, scope, Content, content_id, message=CONTENT_NOT_FOUND)
+    return get_visible(db, scope, Content, content_id)
 
 
 def _content_roots(db: Session, content_ids: Sequence[int], operations: Sequence[str], *, active: bool) -> list[AiTask]:
@@ -1729,7 +1729,7 @@ def attach_asset(
     content = get_content_row(db, scope, content_id)
     if content.status == "generating":
         raise _status_conflict(content.status)
-    asset = get_visible(db, scope, MediaAsset, asset_id, message=ASSET_NOT_FOUND)
+    asset = get_visible(db, scope, MediaAsset, asset_id)
     if asset.status != "ready":
         raise _conflict(MSG_ASSET_NOT_READY, {"current_status": asset.status})
     if asset.project_id is not None and asset.project_id != content.project_id:
@@ -1772,7 +1772,7 @@ def detach_asset(db: Session, scope: DataScope, content_id: int, asset_id: int, 
     """``detach``：素材须绑定在该内容上（否则 404）；``content_id=NULL``、``usage_type=standalone``、``sort=0``，封面则清空
     ``cover_asset_id``；文件不删除。"""
     content = get_content_row(db, scope, content_id)
-    asset = get_visible(db, scope, MediaAsset, asset_id, message=ASSET_NOT_FOUND)
+    asset = get_visible(db, scope, MediaAsset, asset_id)
     if asset.content_id != content.id:
         raise BusinessError(ASSET_NOT_FOUND, code=CODE_NOT_FOUND, http_status=404)
     try:

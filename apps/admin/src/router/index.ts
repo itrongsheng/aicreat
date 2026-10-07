@@ -143,7 +143,9 @@ router.beforeEach(async (to) => {
   const permission = to.meta.permission;
   // `/`（及兜底路由）的 redirect 在守卫之前求值：若当时权限尚未经 /auth/me 校验（无本地缓存或缓存过期），
   // 落点可能是 /403 或已失去权限的菜单，此处按最新权限重新计算首页落点
-  if (to.redirectedFrom && (to.path === "/403" || (permission && !auth.hasPermission(permission)))) {
+  // 守卫自身对无权限路由的 403 重定向（带 query.from）同样带 redirectedFrom，不能被改写为首页：直接输入无权限路由须进入 403 页（07 §11）
+  const guardForbidden = to.path === "/403" && typeof to.query.from === "string";
+  if (to.redirectedFrom && !guardForbidden && (to.path === "/403" || (permission && !auth.hasPermission(permission)))) {
     const home = resolveHomePath();
     if (home !== to.path) return home;
   }

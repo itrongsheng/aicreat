@@ -204,3 +204,33 @@ export function useMediaRuntime() {
 
   return { media, loaded, load };
 }
+
+// ---------- 统计（docs/12 §4.7：stats_config.timezone，统计日按该时区切日，页面角落标注） ----------
+
+/** 后端 `stats_config.timezone` 默认值 */
+export const STATS_TIMEZONE_DEFAULT = "Asia/Shanghai";
+
+/** 统计时区（与生成配置共用 60s 缓存）；接口不可用时回落默认值 */
+export function useStatsRuntime() {
+  const timezone = ref<string>(STATS_TIMEZONE_DEFAULT);
+  const loaded = ref(false);
+
+  async function load(force = false): Promise<string> {
+    try {
+      const rt = await fetchRuntime(force);
+      const tz = rt.stats_config?.timezone;
+      timezone.value = typeof tz === "string" && tz ? tz : STATS_TIMEZONE_DEFAULT;
+    } catch {
+      timezone.value = STATS_TIMEZONE_DEFAULT;
+    }
+    loaded.value = true;
+    return timezone.value;
+  }
+
+  return { timezone, loaded, load };
+}
+
+/** 使运行时缓存失效（保存 stats_config 等配置后调用） */
+export function invalidateRuntimeSettings(): void {
+  cached = null;
+}

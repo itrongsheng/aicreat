@@ -1044,7 +1044,7 @@ onBeforeUnmount(() => {
         <el-alert v-if="staleVersion" type="warning" :closable="false" show-icon class="stale-alert">
           <template #title>
             {{ t("editor.staleVersion") }}
-            <el-link type="primary" :underline="false" @click="reload(true)">{{ t("editor.loadNewVersion") }}</el-link>
+            <el-link type="primary" underline="never" @click="reload(true)">{{ t("editor.loadNewVersion") }}</el-link>
           </template>
         </el-alert>
         <el-alert

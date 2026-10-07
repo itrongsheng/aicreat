@@ -9,8 +9,10 @@
   （启动时读取 ``monitoring_config``，修改后需重启进程）；
 - 每轮：心跳 ``worker:heartbeat:monitor_worker:{hostname}:{pid}`` → ``schedule_link_checks.enqueue_due`` /
   ``schedule_index_checks.enqueue_due``（主循环线程，按各自 ``scan_interval_seconds``，``enabled=false`` 时不扫描）→
-  ``run_link_checks.drain`` / ``run_index_checks.drain``（提交线程池）→ ``drain_recompute``（``queue:stats_recompute``）→
-  每日聚合（``stats_config.daily_at`` 聚合昨天并重算前天）、今日刷新（``intraday_refresh_seconds``）、``evaluate_alerts``（300s）；
+  ``run_link_checks.drain`` / ``run_index_checks.drain``（提交线程池）→ ``drain_recompute(pool)``（``recompute`` 不在飞时
+  ``LPOP queue:stats_recompute`` 一条并 ``named_submit("recompute", …)``）→ 每日聚合 ``run_daily("daily_stats", daily_at,
+  daily_job)``（聚合昨天、重算前天并按保留期清理）、今日刷新 ``run_due("stats_today", intraday_refresh_seconds)``、
+  ``evaluate_alerts``（300s）；
 - 有任务提交时不休眠，否则 ``MONITOR_POLL_INTERVAL_SECONDS``。
 
 收录检测（``schedule_index_checks`` / ``run_index_checks``）、统计聚合（``aggregate_daily_stats``）与告警评估（``evaluate_alerts``）
@@ -120,6 +122,7 @@ class MonitorWorker:
         self.catch_up = optional_task("aggregate_daily_stats", "catch_up")
         self.aggregate = optional_task("aggregate_daily_stats", "aggregate")
         self.aggregate_today = optional_task("aggregate_daily_stats", "aggregate_today")
+        self.daily_job = optional_task("aggregate_daily_stats", "daily_job")
         self.drain_recompute = optional_task("aggregate_daily_stats", "drain_recompute")
         self.evaluate_alerts = optional_task("evaluate_alerts", "evaluate")
 
@@ -135,7 +138,11 @@ class MonitorWorker:
     # ------------------------------------------------------------ 每轮
 
     def _daily_aggregate(self) -> None:
-        """每日 ``stats_config.daily_at``：聚合昨天并重算前天（各自持 ``lock:monitor:daily_stats:{date}``，由聚合函数内部获取）。"""
+        """每日 ``stats_config.daily_at``：聚合昨天并重算前天（各自持 ``lock:monitor:daily_stats:{date}``，由聚合函数内部获取），
+        随后按 ``retention_days`` 清理（``aggregate_daily_stats.daily_job``）。"""
+        if self.daily_job is not None:
+            self.daily_job()
+            return
         if self.aggregate is None:
             return
         with SessionLocal() as db:
@@ -168,11 +175,15 @@ class MonitorWorker:
             submitted += int(self.run_index_checks_drain(self.pool, limit=INDEX_DRAIN_LIMIT, sems=self.sems) or 0)
         timers = self.timers
         if self.drain_recompute is not None:
-            self.pool.named_submit("stats_recompute", self.drain_recompute)
-        if self.aggregate is not None:
+            # recompute 在飞时不出队（元素留在队列等待下一轮）；出队后 named_submit("recompute", …)，主循环不等待
+            try:
+                self.drain_recompute(self.pool)
+            except Exception:  # noqa: BLE001 - Redis 暂不可用等，下一轮重试
+                logger.exception("drain_recompute 失败")
+        if self.daily_job is not None or self.aggregate is not None:
             timers.run_daily("daily_stats", str(stats_cfg.get("daily_at") or DEFAULT_DAILY_AT), self._daily_aggregate, tz=tz)
         if self.aggregate_today is not None:
-            timers.run_due("aggregate_today", stats_cfg.get("intraday_refresh_seconds"), self.aggregate_today)
+            timers.run_due("stats_today", stats_cfg.get("intraday_refresh_seconds"), self.aggregate_today)
         if self.evaluate_alerts is not None:
             timers.run_due("evaluate_alerts", EVALUATE_ALERTS_INTERVAL_SECONDS, self.evaluate_alerts)
         return submitted

@@ -97,3 +97,23 @@ export function formatBytes(bytes: number | string | null | undefined): string {
   }
   return `${i === 0 ? n : n.toFixed(1)} ${units[i]}`;
 }
+
+/** tokens：≥ 1 万显示为 `12.3K` / `1.83M`（docs/12 §5.3），否则千分位整数 */
+export function formatTokens(value: number | string | null | undefined): string {
+  if (value === null || value === undefined || value === "") return EMPTY;
+  const n = Number(value);
+  if (!Number.isFinite(n)) return EMPTY;
+  const abs = Math.abs(n);
+  if (abs >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(2)}B`;
+  if (abs >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
+  if (abs >= 10_000) return `${(n / 1_000).toFixed(1)}K`;
+  return formatNumber(Math.round(n));
+}
+
+/** 小时数（收录耗时）：保留 1 位小数并带 `h` */
+export function formatHours(value: number | string | null | undefined): string {
+  if (value === null || value === undefined || value === "") return EMPTY;
+  const n = Number(value);
+  if (!Number.isFinite(n)) return EMPTY;
+  return `${n.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 1 })}h`;
+}

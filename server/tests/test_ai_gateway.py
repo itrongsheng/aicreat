@@ -764,6 +764,31 @@ def test_reconcile_matches_and_is_idempotent(synced: Session, project: Project) 
     assert set(own) == {"pulled_at", "window_overflow"}
 
 
+def test_reconcile_retries_entries_pulled_before_attempt_commit(synced: Session, project: Project) -> None:
+    """上游日志先于本地尝试行提交被拉到（周期对账与 worker 写库竞争）：该条目首轮未匹配，下一轮对账重试后完成首次对账。"""
+    root = make_root(synced, project_id=project.id)
+    _, attempt = gw.complete_text(synced, root_task=root, messages=MESSAGES, params=None, response_format="text")
+    gw.finalize_root(synced, root, "succeeded")
+    request_id = attempt.request_id
+    attempt.request_id = None                     # 模拟：拉取时尝试行尚未带 request_id 落库
+    synced.commit()
+    first = ai_usage_service.reconcile(synced)
+    assert (first["new"], first["matched"], first["unmatched"]) == (1, 0, 1)
+    attempt.request_id = request_id
+    synced.commit()
+    second = ai_usage_service.reconcile(synced)
+    assert (second["new"], second["matched"], second["unmatched"]) == (0, 0, 0)
+    synced.refresh(attempt)
+    synced.refresh(root)
+    assert attempt.reconciled_at is not None and attempt.quota_actual == attempt.quota_estimated
+    assert root.quota_actual == attempt.quota_actual
+    log = synced.scalar(select(AiUsageLog).where(AiUsageLog.request_id == request_id))
+    assert log.ai_task_id == attempt.id and log.matched_at is not None
+    third = ai_usage_service.reconcile(synced)                     # 已匹配条目不再参与
+    synced.refresh(attempt)
+    assert third["matched"] == 0 and attempt.quota_actual == attempt.quota_estimated
+
+
 def test_reconcile_refunds_type5_and_duplicates(gdb: Session, upstream: FakeUpstream, monkeypatch: pytest.MonkeyPatch) -> None:
     set_route(gdb, "image", "img1", [], protocol="image_async")
     upstream.handler = lambda r, m: (202, {"id": "task_refund", "status": "queued"})

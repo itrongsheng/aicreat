@@ -146,7 +146,6 @@ IMAGE_DOWNLOAD_TYPES = ("image/", "application/octet-stream", "binary/octet-stre
 VIDEO_DOWNLOAD_TYPES = ("video/", "application/octet-stream", "binary/octet-stream")
 PAUSE_CATEGORY_VALUES = frozenset({"quota_exceeded", "auth_failed"})
 
-MSG_ASSET_NOT_FOUND = content_service.ASSET_NOT_FOUND
 MSG_CONTENT_NOT_FOUND = content_service.CONTENT_NOT_FOUND
 MSG_PUBLIC_URL = "参考素材 URL 必须是公网可访问地址"
 MSG_DAILY_LIMIT = {"image": "今日图片生成已达上限", "video": "今日视频生成已达上限"}
@@ -383,7 +382,7 @@ def _check_content(
         msg = "由文章生成提示词须指定关联内容" if from_content_prompt else "用途为封面或配图时必须指定关联内容"
         errors.append(field_error(["body", "content_id"], msg, "missing", None))
         return None
-    content = get_visible(db, scope, Content, content_id, message=MSG_CONTENT_NOT_FOUND)
+    content = get_visible(db, scope, Content, content_id)
     if content.project_id != project.id:
         errors.append(field_error(["body", "content_id"], "内容不属于该项目", "project_mismatch", content_id))
     return content
@@ -1524,7 +1523,7 @@ def retry_asset(db: Session, scope: DataScope, asset_id: int, *, admin_id: int |
     ``polling`` 创建（继承 ``upstream_task_id``、新预算）；``failed`` / ``expired`` / 404 → 重新提交；复查遇其它 ``ZhiqiError`` →
     5021（``data.error_category`` / ``request_id``），状态不变。其余情况（含 ``transfer_failed`` / ``cancelled``）直接重新提交：
     新根任务 ``queued``，重新 ``check_quota`` 并计入 ``limit:images|videos``。返回 ``{asset, task_id, resumed}``。"""
-    asset = get_visible(db, scope, MediaAsset, asset_id, message=MSG_ASSET_NOT_FOUND)
+    asset = get_visible(db, scope, MediaAsset, asset_id)
     if asset.status not in RETRYABLE_STATUSES:
         raise _conflict(MSG_RETRY_CONFLICT, {"current_status": asset.status})
     old = db.get(AiTask, asset.ai_task_id) if asset.ai_task_id else None
@@ -1609,7 +1608,7 @@ def request_transfer(db: Session, scope: DataScope, asset_id: int) -> dict[str, 
     """``POST /admin/media/assets/{id}/transfer``：``failed(transfer_failed | timeout)`` 且 ``upstream_url`` 非空 → ``downloading``，
     ``transfer_attempts`` 清零、``failed_at`` 清空、``next_transfer_at=now``（API 进程不下载，由 ``retry_due`` 领取）；不新建根任务。
     其它情况 409 ``current_status``。返回 ``{asset}``。"""
-    asset = get_visible(db, scope, MediaAsset, asset_id, message=MSG_ASSET_NOT_FOUND)
+    asset = get_visible(db, scope, MediaAsset, asset_id)
     if asset.status != "failed" or asset.error_category not in TRANSFERABLE_CATEGORIES or not asset.upstream_url:
         raise _conflict(MSG_TRANSFER_CONFLICT, {"current_status": asset.status})
     asset.transfer_attempts = 0
@@ -1662,7 +1661,7 @@ def delete_asset(db: Session, scope: DataScope, asset_id: int) -> None:
     """``DELETE /admin/media/assets/{id}``：仅 ``ready`` / ``failed`` / ``expired``（其它状态含已 ``deleted`` → 409
     ``current_status``）；``usage_type=reference`` 的上传素材被任一 ``pending`` / ``submitted`` 资产引用 → 409 ``reason=in_use``
     （按全部引用判断，不受数据范围约束）。同一事务置 ``deleted`` 并解绑内容，提交后删除存储文件。"""
-    asset = get_visible(db, scope, MediaAsset, asset_id, message=MSG_ASSET_NOT_FOUND)
+    asset = get_visible(db, scope, MediaAsset, asset_id)
     if asset.status not in DELETABLE_STATUSES:
         raise _conflict(MSG_DELETE_CONFLICT, {"current_status": asset.status})
     if asset.usage_type == "reference" and _referencing_rows(db, asset.id, statuses=IN_USE_STATUSES):
@@ -1740,7 +1739,7 @@ def list_assets(
 
 def get_asset_detail(db: Session, scope: DataScope, asset_id: int) -> dict[str, Any]:
     """``GET /admin/media/assets/{id}``：``AssetOut`` + 根任务摘要 ``task`` + 引用 ``references``。"""
-    asset = get_visible(db, scope, MediaAsset, asset_id, message=MSG_ASSET_NOT_FOUND)
+    asset = get_visible(db, scope, MediaAsset, asset_id)
     item = content_service.asset_item(db, scope, asset)
     root = db.get(AiTask, asset.ai_task_id) if asset.ai_task_id else None
     item["task"] = asset_task_summary(root)
@@ -1750,7 +1749,7 @@ def get_asset_detail(db: Session, scope: DataScope, asset_id: int) -> dict[str, 
 
 def get_asset_task(db: Session, scope: DataScope, asset_id: int) -> dict[str, Any] | None:
     """``GET /admin/media/assets/{id}/task``：当前根任务摘要（备选回退 / 重试后自动指向新根任务）；上传素材无任务返回 ``None``。"""
-    asset = get_visible(db, scope, MediaAsset, asset_id, message=MSG_ASSET_NOT_FOUND)
+    asset = get_visible(db, scope, MediaAsset, asset_id)
     root = db.get(AiTask, asset.ai_task_id) if asset.ai_task_id else None
     return asset_task_summary(root)
 

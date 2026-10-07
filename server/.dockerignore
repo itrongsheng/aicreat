@@ -1,0 +1,19 @@
+# 不进镜像：本机虚拟环境、本地素材、密钥与缓存（docs/05 §3.3、§9.5）
+.venv/
+venv/
+storage/
+.env
+.env.*
+!.env.example
+__pycache__/
+*.py[cod]
+*.log
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+tests/
+Dockerfile
+.dockerignore

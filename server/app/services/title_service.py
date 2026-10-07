@@ -101,7 +101,6 @@ STYLE_GUIDE: dict[str, tuple[str, str]] = {
 
 AI_SCORE_QUANT = Decimal("0.1")
 SCORE_MIN, SCORE_MAX = Decimal(0), Decimal(10)
-TITLE_NOT_FOUND = "标题不存在"
 KEYWORD_NOT_FOUND = "关键词不存在"
 MSG_STATUS_CONFLICT = "当前状态不允许该操作"
 MSG_KEYWORD_NOT_ADOPTED = "关键词未采用"
@@ -233,7 +232,7 @@ def list_titles(
 
 
 def get_title_row(db: Session, scope: DataScope, title_id: int) -> Title:
-    return get_visible(db, scope, Title, title_id, message=TITLE_NOT_FOUND)
+    return get_visible(db, scope, Title, title_id)
 
 
 def get_title(db: Session, scope: DataScope, title_id: int) -> dict[str, Any]:
@@ -265,7 +264,7 @@ def _bump_title_count(db: Session, keyword_id: int, delta: int) -> None:
 def create_title(db: Session, scope: DataScope, values: Mapping[str, Any], *, admin_id: int) -> dict[str, Any]:
     """``POST /admin/titles``：关键词须可见（404），所属项目 ``active``（409）；``source=manual``、``status=candidate``；同事务
     ``keywords.title_count += 1``。同关键词下重复标题服务端不拦截。"""
-    keyword = get_visible(db, scope, Keyword, int(values["keyword_id"]), message=KEYWORD_NOT_FOUND)
+    keyword = get_visible(db, scope, Keyword, int(values["keyword_id"]))
     project = require_project(db, scope, keyword.project_id, active=True)
     text = clean_title(values.get("title"))
     if not text:

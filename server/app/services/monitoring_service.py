@@ -28,7 +28,6 @@ from app.services.data_scope_service import DataScope, get_visible, scope_by_pro
 
 logger = logging.getLogger(__name__)
 
-MSG_CHECK_NOT_FOUND = "检测记录不存在"
 
 
 def _llen(key: str) -> int:
@@ -144,7 +143,7 @@ def list_link_checks(
 
 
 def get_link_check(db: Session, scope: DataScope, check_id: int) -> dict[str, Any]:
-    check = get_visible(db, scope, LinkCheck, check_id, message=MSG_CHECK_NOT_FOUND)
+    check = get_visible(db, scope, LinkCheck, check_id)
     return _link_check_item(check, _link_briefs(db, {check.link_id}))
 
 
@@ -186,7 +185,7 @@ def list_index_checks(
 
 
 def get_index_check(db: Session, scope: DataScope, check_id: int) -> dict[str, Any]:
-    check = get_visible(db, scope, IndexCheck, check_id, message=MSG_CHECK_NOT_FOUND)
+    check = get_visible(db, scope, IndexCheck, check_id)
     return link_service.index_check_item(check)
 
 

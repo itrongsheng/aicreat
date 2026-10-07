@@ -434,7 +434,7 @@ const tabs: StatusTab[] = ["all", ...CONTENT_STATUS];
       <el-table v-loading="loading" :data="rows" row-key="id" stripe>
         <el-table-column :label="t('contents.titleCol')" min-width="260">
           <template #default="{ row }">
-            <el-link type="primary" :underline="false" class="title-link" @click="openEditor(row)">{{ row.title }}</el-link>
+            <el-link type="primary" underline="never" class="title-link" @click="openEditor(row)">{{ row.title }}</el-link>
             <div v-if="isBusy(row)" class="row-task">
               <TaskProgress v-if="tasks[row.id]" :task="tasks[row.id]" compact :show-hint="false" />
               <el-progress v-else :percentage="0" indeterminate :stroke-width="4" :show-text="false" />

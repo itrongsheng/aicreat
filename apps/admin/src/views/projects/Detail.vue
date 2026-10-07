@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // 项目详情（docs/09 §4.2、§4.3、docs/04 §6.7、§7.3、docs/13 §7.1）三个 Tab：
-// - 概览：项目基本信息 + GET /admin/projects/{id}/overview（结构同 /admin/stats/overview）中已有的 KPI 与状态分布；
+// - 概览：项目基本信息 + GET /admin/projects/{id}/overview（结构同 /admin/stats/overview）的 KPI 卡片（KpiCard：环比、迷你趋势）与状态分布；
 // - 默认模板：每个 prompt_kind 一个下拉，只列该 kind、project_id ∈ {0, 该项目} 的 published 模板，未选即按系统缺省 code 回退；
 //   保存走 PUT /admin/projects/{id}（400 loc=["body","default_templates","<kind>"] 定位到对应行）；
 // - 默认模型：keyword / title / content / rewrite 四个文本能力各一行 ModelSelect（modality=text）+ 备选链 + params，
@@ -37,11 +37,12 @@ import * as projectsApi from "@/api/projects";
 import * as promptTemplatesApi from "@/api/promptTemplates";
 import JsonEditor from "@/components/JsonEditor.vue";
 import ModelSelect from "@/components/ModelSelect.vue";
+import KpiCard, { type KpiFormat } from "@/components/KpiCard.vue";
 import StatusTag from "@/components/StatusTag.vue";
 import { usePermission } from "@/composables/usePermission";
 import { useAuthStore } from "@/store/auth";
 import { useProjectStore } from "@/store/project";
-import { formatCny, formatDateTime, formatNumber, formatPercent } from "@/utils/format";
+import { formatCny, formatDateTime, formatNumber } from "@/utils/format";
 
 type TabName = "overview" | "templates" | "models";
 const TABS: TabName[] = ["overview", "templates", "models"];
@@ -140,40 +141,72 @@ async function loadOverview() {
 
 watch(range, () => void loadOverview());
 
-type KpiFormat = "number" | "percent" | "cny";
-const KPI_ITEMS: { key: keyof StatsOverviewKpis; format: KpiFormat }[] = [
-  { key: "keywords_total", format: "number" },
-  { key: "keyword_adopt_rate", format: "percent" },
-  { key: "titles_total", format: "number" },
-  { key: "contents_total", format: "number" },
-  { key: "contents_approved", format: "number" },
-  { key: "contents_published", format: "number" },
-  { key: "links_total", format: "number" },
-  { key: "link_alive_rate", format: "percent" },
-  { key: "seo_index_rate", format: "percent" },
-  { key: "geo_cite_rate", format: "percent" },
-  { key: "ai_calls", format: "number" },
-  { key: "task_success_rate", format: "percent" },
-  { key: "tokens_total", format: "number" },
-  { key: "cost_cny", format: "cny" },
+/** 项目 KPI 卡（KpiCard，结构同总览）：主值、环比（compare 有该指标时）、迷你趋势（series）与当前值副值 */
+interface ProjectKpi {
+  key: keyof StatsOverviewKpis;
+  format: KpiFormat;
+  /** 环比所用指标（当前值指标无环比） */
+  compareKey?: keyof StatsOverviewKpis;
+  spark?: "ai_calls" | "cost_cny" | "links_backfilled" | "seo_newly_indexed";
+  sub?: () => string;
+}
+
+function kpi(key: keyof StatsOverviewKpis): number | null {
+  const v = overview.value?.kpis?.[key];
+  return v === undefined ? null : (v as number | null);
+}
+
+const KPI_ITEMS: ProjectKpi[] = [
+  { key: "keywords_total", format: "number", sub: () => `${t("stats.metrics.keywords_created")} ${formatNumber(kpi("keywords_created"))}`, compareKey: "keywords_created" },
+  { key: "keyword_adopt_rate", format: "percent", compareKey: "keyword_adopt_rate" },
+  { key: "titles_total", format: "number", sub: () => `${t("stats.metrics.titles_created")} ${formatNumber(kpi("titles_created"))}`, compareKey: "titles_created" },
+  { key: "contents_total", format: "number", sub: () => `${t("stats.metrics.contents_created")} ${formatNumber(kpi("contents_created"))}`, compareKey: "contents_created" },
+  { key: "contents_approved", format: "number", compareKey: "contents_approved" },
+  { key: "contents_published", format: "number", compareKey: "contents_published" },
+  {
+    key: "links_total",
+    format: "number",
+    sub: () => `${t("stats.metrics.links_backfilled")} ${formatNumber(kpi("links_backfilled"))}`,
+    compareKey: "links_backfilled",
+    spark: "links_backfilled",
+  },
+  {
+    key: "link_alive_rate",
+    format: "percent",
+    sub: () => t("dashboard.sub.alive", { alive: formatNumber(kpi("links_alive")), deleted: formatNumber(kpi("links_deleted")) }),
+  },
+  {
+    key: "seo_index_rate",
+    format: "percent",
+    sub: () => `${t("stats.metrics.seo_newly_indexed")} ${formatNumber(kpi("seo_newly_indexed"))}`,
+    compareKey: "seo_newly_indexed",
+    spark: "seo_newly_indexed",
+  },
+  { key: "geo_cite_rate", format: "percent", sub: () => `${t("stats.metrics.geo_newly_cited")} ${formatNumber(kpi("geo_newly_cited"))}`, compareKey: "geo_newly_cited" },
+  { key: "ai_calls", format: "number", compareKey: "ai_calls", spark: "ai_calls" },
+  { key: "task_success_rate", format: "percent", compareKey: "task_success_rate" },
+  { key: "tokens_total", format: "tokens", compareKey: "tokens_total" },
+  {
+    key: "cost_cny",
+    format: "currency",
+    sub: () => `${t("stats.metrics.cost_cny_per_content")} ${formatCny(kpi("cost_cny_per_content"))}`,
+    compareKey: "cost_cny",
+    spark: "cost_cny",
+  },
 ];
 
-/** 只展示接口实际返回的指标（报表阶段之前的占位结构只含总量类指标） */
+/** 只展示接口实际返回的指标 */
 const visibleKpis = computed(() => {
   const kpis = overview.value?.kpis;
   if (!kpis) return [];
-  return KPI_ITEMS.filter((item) => item.key in kpis);
+  return KPI_ITEMS.filter((item) => item.key in kpis).map((item) => ({
+    ...item,
+    value: kpi(item.key),
+    compare: item.compareKey ? (overview.value?.compare?.[item.compareKey] ?? null) : undefined,
+    sparkline: item.spark ? overview.value?.series?.[item.spark] : undefined,
+    subText: item.sub ? item.sub() : "",
+  }));
 });
-
-function kpiValue(key: keyof StatsOverviewKpis, format: KpiFormat): string {
-  const kpis = overview.value?.kpis;
-  if (!kpis) return "-";
-  const v = kpis[key];
-  if (v === null || v === undefined) return "-";
-  if (format === "percent") return formatPercent(v);
-  if (format === "cny") return formatCny(v);
-  return formatNumber(v);
-}
 
 const statusBreakdowns = computed(() => {
   const b = overview.value?.breakdowns;
@@ -606,12 +639,18 @@ watch(projectId, async () => {
           <div v-loading="overviewLoading">
             <el-empty v-if="!overview" :image-size="60" :description="overviewFailed ? t('projects.overview.unavailable') : t('common.noData')" />
             <template v-else>
-              <div class="kpi-grid">
-                <div v-for="item in visibleKpis" :key="item.key" class="kpi">
-                  <div class="kpi-label">{{ t(`projects.overview.kpi.${item.key}`) }}</div>
-                  <div class="kpi-value">{{ kpiValue(item.key, item.format) }}</div>
-                </div>
-              </div>
+              <el-row :gutter="12">
+                <el-col v-for="item in visibleKpis" :key="item.key" :xs="24" :sm="12" :md="8" :lg="6" class="kpi-col">
+                  <KpiCard
+                    :title="t(`projects.overview.kpi.${item.key}`)"
+                    :value="item.value"
+                    :format="item.format"
+                    :sub="item.subText"
+                    :compare="item.compare"
+                    :sparkline="item.sparkline"
+                  />
+                </el-col>
+              </el-row>
               <div v-if="overview.meta?.start_date" class="text-secondary small meta-line">
                 {{ t("projects.overview.period", { start: overview.meta.start_date, end: overview.meta.end_date }) }}
                 <template v-if="overview.meta.computed_at"> · {{ t("projects.overview.computedAt", { time: formatDateTime(overview.meta.computed_at) }) }}</template>
@@ -828,25 +867,8 @@ watch(projectId, async () => {
   font-size: 14px;
   font-weight: 600;
 }
-.kpi-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-  gap: 10px;
-}
-.kpi {
-  padding: 10px 12px;
-  border: 1px solid var(--el-border-color-lighter);
-  border-radius: 4px;
-  background: var(--el-fill-color-blank);
-}
-.kpi-label {
-  color: var(--el-text-color-secondary);
-  font-size: 12px;
-}
-.kpi-value {
-  margin-top: 4px;
-  font-size: 20px;
-  font-weight: 600;
+.kpi-col {
+  margin-bottom: 12px;
 }
 .meta-line {
   margin-top: 8px;

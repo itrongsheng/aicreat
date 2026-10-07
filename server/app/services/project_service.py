@@ -8,7 +8,7 @@
 - 删除：仅 ``archived`` 且无关键词 / 标题 / 内容 / 链接 / 素材 / 批次；同一事务删除项目专属模板与路由覆盖、``ai_tasks`` /
   ``alerts`` 的 ``project_id`` 置 NULL（``daily_stats`` 项目行保留），提交后清 ``cache:routes:*`` 与 ``cache:stats:*``；
 - ``save_project_routes``：运营侧项目覆盖路由（docs/03 B.17、docs/08 §6.7、§11.4 第 4 条）；
-- ``overview``：委托 ``stats_service.overview``（第 6 步实现）；缺失时返回按库实时计算的最小 KPI 结构（``meta.placeholder``）。
+- ``overview``：委托 ``stats_service.overview(project_id=id, range)``（结构同 ``GET /admin/stats/overview``）。
 
 所有读写函数以 ``scope`` 为必填参数（docs/13 §9.3），目标项目不可见与不存在一律 404。
 """
@@ -69,7 +69,6 @@ __all__ = [
 ]
 
 STATS_CACHE_PREFIX = "cache:stats:"
-PROJECT_NOT_FOUND = "项目不存在"
 MSG_OWNER_FORBIDDEN = "只能创建或保留自己负责的项目"
 MSG_OWNER_UNAVAILABLE = "负责人不存在或已禁用"
 MSG_NAME_EXISTS = "该负责人下已存在同名项目"
@@ -181,7 +180,7 @@ def _detail(db: Session, project: Project) -> dict[str, Any]:
 
 def get_project_row(db: Session, scope: DataScope, project_id: int) -> Project:
     """目标项目须可见（``own`` 范围即本人负责），否则 404。"""
-    return get_visible(db, scope, Project, project_id, message=PROJECT_NOT_FOUND)
+    return get_visible(db, scope, Project, project_id)
 
 
 # =====================================================================
@@ -526,57 +525,7 @@ def save_project_routes(
 # =====================================================================
 
 
-def _placeholder_overview(db: Session, scope: DataScope, project: Project, range_: str) -> dict[str, Any]:
-    """第 6 步 ``stats_service.overview`` 实现之前的最小 KPI 结构：只含按库实时统计的当前值（总量与状态分布），流量类、
-    比率类与趋势留空；``meta.placeholder = true``、``meta.warnings`` 含 ``stats_overview_unavailable``。"""
-
-    def _by_status(model: Any) -> dict[str, int]:
-        rows = db.execute(select(model.status, func.count(model.id)).where(model.project_id == project.id).group_by(model.status)).all()
-        return {str(status): int(count) for status, count in rows}
-
-    keywords = _by_status(Keyword)
-    titles = _by_status(Title)
-    contents = _by_status(Content)
-    links_rows = db.execute(
-        select(PublishLink.alive_status, func.count(PublishLink.id)).where(PublishLink.project_id == project.id).group_by(PublishLink.alive_status)
-    ).all()
-    links = {str(status): int(count) for status, count in links_rows}
-    return {
-        "meta": {
-            "range": range_,
-            "project_id": project.id,
-            "scope": "owner" if scope.restricted else "all",
-            "owner_id": scope.owner_id if scope.restricted else None,
-            "placeholder": True,
-            "warnings": ["stats_overview_unavailable"],
-        },
-        "kpis": {
-            "keywords_total": sum(keywords.values()),
-            "keywords_adopted": keywords.get("adopted", 0),
-            "titles_total": sum(titles.values()),
-            "titles_adopted": titles.get("adopted", 0),
-            "contents_total": sum(contents.values()),
-            "contents_approved": contents.get("approved", 0),
-            "contents_published": contents.get("published", 0),
-            "links_total": sum(links.values()),
-            "links_alive": links.get("alive", 0),
-            "links_deleted": links.get("deleted", 0),
-        },
-        "compare": {},
-        "breakdowns": {
-            "keywords_by_status": keywords,
-            "titles_by_status": titles,
-            "contents_by_status": contents,
-            "links_by_status": links,
-        },
-        "series": {"dates": []},
-    }
-
-
 def overview(db: Session, scope: DataScope, project_id: int, *, range_: str = "7d") -> dict[str, Any]:
     """``GET /admin/projects/{id}/overview``：返回结构 = ``GET /admin/stats/overview?project_id={id}``（docs/12 §9.1）。"""
     project = get_project_row(db, scope, project_id)
-    stats_overview = getattr(stats_service, "overview", None)
-    if callable(stats_overview):
-        return stats_overview(db, scope, project_id=project.id, range=range_)
-    return _placeholder_overview(db, scope, project, range_)
+    return stats_service.overview(db, scope, project_id=project.id, range=range_)

@@ -105,7 +105,6 @@ APPLY_COUNT_KEYS: tuple[str, ...] = ("duplicates", "invalid", "intent_missing", 
 FAILED_ROOT_STATUSES = ("failed", "cancelled", "expired")
 ACTIVE_ROOT_STATUSES = ("queued", "running", "polling")
 CONVERGE_FROM = ("queued", "running")
-BATCH_NOT_FOUND = "批次不存在"
 MSG_BATCH_NOT_CANCELLABLE = "当前批次状态不可取消"
 MSG_BATCH_NOT_RETRYABLE = "当前批次没有可重试的失败任务"
 MSG_PAUSED = "AI 调用已暂停"
@@ -569,7 +568,7 @@ def _batch_tasks(db: Session, batch_id: int) -> list[dict[str, Any]]:
 
 def get_batch(db: Session, scope: DataScope, batch_id: int) -> GenerationBatch:
     """可见批次（按所属项目判断，不可见与不存在一律 404）。"""
-    return get_visible(db, scope, GenerationBatch, batch_id, message=BATCH_NOT_FOUND)
+    return get_visible(db, scope, GenerationBatch, batch_id)
 
 
 def batch_detail(db: Session, scope: DataScope, batch_id: int) -> dict[str, Any]:
